@@ -41,7 +41,7 @@ internal static class Menu
 
     /// A generated image of a stage with Menu.Images, cloned from a vanilla UI texture of the same size and pixel format.
     /// Art images (cropped from the DR2 loading art, Menu.Art) are only made when the spec names one.
-    public sealed record Image(string Kind, string Template, int W, int H, string Format, bool Art)
+    public sealed record Image(string Kind, string Template, int W, int H, string Format, bool Art, bool Reverse = false)
     {
         public int Bytes => Format == "PF_BC7" ? W * H : W * H * 4;
     }
@@ -51,18 +51,24 @@ internal static class Menu
         new("Map", "/Game/Data/UITextures/Tracks/Tracks/Wales/HafrenNorth/T_HafrenNorthFullForward", 800, 800, "PF_B8G8R8A8", false),        // DT_Tracks.Map
         new("MapSmall", "/Game/Data/UITextures/Tracks/Tracks/Wales/HafrenNorth/T_HafrenNorthFullForward", 800, 800, "PF_B8G8R8A8", false),   // variant MapSmall
         new("Elevation", "/Game/Data/UITextures/Tracks/Tracks/Wales/T_HafrenSouthAltimetry", 306, 142, "PF_B8G8R8A8", false),               // variant ElevationMap
+        new("MapSmallReverse", "/Game/Data/UITextures/Tracks/Tracks/Wales/HafrenNorth/T_HafrenNorthFullForward", 800, 800, "PF_B8G8R8A8", false, true),   // reverse variant MapSmall
+        new("ElevationReverse", "/Game/Data/UITextures/Tracks/Tracks/Wales/T_HafrenSouthAltimetry", 306, 142, "PF_B8G8R8A8", false, true),           // reverse variant ElevationMap
         new("Backdrop", "/Game/Data/UITextures/Tracks/T_HafrenSouthBackground", 1325, 922, "PF_B8G8R8A8", true),                            // DT_Tracks.TrackImage + LobbyTrackImage
         new("Banner", "/Game/Data/UITextures/Tracks/TracksImages/Wales/T_Severne", 1720, 448, "PF_BC7", true),                               // variant VariantImage
         new("Lobby", "/Game/Data/UITextures/Tracks/LobbyImages/SingleStage/Wales/T_Afon_Lobby", 170, 100, "PF_B8G8R8A8", true),             // variant LobbyVariantImage
     ];
 
-    public static IEnumerable<Image> For(StageSpec s) => Images.Where(i => !i.Art || s.Menu?.Art is not null);
+    public static IEnumerable<Image> For(StageSpec s) => Images.Where(i => (!i.Art || s.Menu?.Art is not null) && (!i.Reverse || HasReverse(s)));
+
+    /// A variant driving another DR2 route than the spec's (a pair's reverse) gets its own variant map and elevation images.
+    public static bool HasReverse(StageSpec s) => s.Variants.Any(v => s.StageOf(v) != s.Stage);
+    public static string VariantKind(StageSpec s, StageSpec.VariantSpec v, string kind) => s.StageOf(v) != s.Stage ? kind + "Reverse" : kind;
     public static string Package(string id, string kind) => $"/Game/AcrXs/Stages/{id}/Menu/T_{id}_{kind}";
     public static string ObjectPath(string id, string kind) => $"{Package(id, kind)}.T_{id}_{kind}";
     public static string TextureRow(string id, string kind) => $"{id}_{kind}";
 
     /// `menu-assets --ir <work/ir/stage> --id <AcrXsXX> --legacy <root with the templates> --out <mod root> [--art <DR2 loading .tpk>]
-    /// [--preview <dir>]`: the track map, variant map and elevation profile (and with --art the track backdrop, variant banner and
+    /// [--preview <dir>] [--reverse-ir <work/ir/reverse stage>]`: the track map, variant map and elevation profile (and with --art the track backdrop, variant banner and
     /// lobby thumbnail cropped from DR2's loading art) as UI textures under /Game/AcrXs/Stages/<id>/Menu/ (stage container).
     public static int Assets(Opts o)
     {
@@ -74,6 +80,13 @@ internal static class Menu
             ["MapSmall"] = MenuArt.VariantMap(r).Rgba8(),
             ["Elevation"] = MenuArt.Elevation(r).Rgba8(),
         };
+        if (o.Named.GetValueOrDefault("reverse-ir") is { } revIr)
+        {
+            // a pair's reverse variant: the same road driven from the other end, so its own start / finish and profile
+            var rr = new StageRoute(Path.Combine(revIr, "stage.json"));
+            px["MapSmallReverse"] = MenuArt.VariantMap(rr, frame: r).Rgba8();
+            px["ElevationReverse"] = MenuArt.Elevation(rr).Rgba8();
+        }
         var artTpk = o.Named.GetValueOrDefault("art");
         if (artTpk is not null)
         {
