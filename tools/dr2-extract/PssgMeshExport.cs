@@ -112,9 +112,10 @@ internal static class PssgMeshExport
     /// prototype's own space. Returns the overall result plus per-prototype bounds and triangle counts.
     /// </summary>
     public static (RenderExportResult Result, Dictionary<string, (Vector3 Min, Vector3 Max, int Triangles)> Prototypes)
-        ExportPrototypes(IEnumerable<(string Name, IReadOnlyList<PssgNode> Nodes)> prototypes, string outGlb)
+        ExportPrototypes(IEnumerable<(string Name, IReadOnlyList<PssgNode> Nodes)> prototypes, string outGlb,
+        string? nodeFilter = null, string? nodeExclude = null, bool expandBillboards = false)
     {
-        var writer = new SceneWriter(null, null);
+        var writer = new SceneWriter(null, nodeFilter, nodeExclude, expandBillboards);
         var stats = new Dictionary<string, (Vector3 Min, Vector3 Max, int Triangles)>();
         foreach (var (name, nodes) in prototypes)
         {
@@ -145,7 +146,7 @@ internal static class PssgMeshExport
         public int Triangles { get; set; }
     }
 
-    private sealed class SceneWriter(Func<Vector3, bool>? keepTriangle, string? nodeFilter)
+    private sealed class SceneWriter(Func<Vector3, bool>? keepTriangle, string? nodeFilter, string? nodeExclude = null, bool expandBillboards = false)
     {
         public SceneBuilder Scene { get; } = new();
 
@@ -167,7 +168,8 @@ internal static class PssgMeshExport
             var world = node.ChildElements.OfType<PssgTransform>().FirstOrDefault()?.Transform * parentWorld ?? parentWorld;
             // Track terrain tiles come in pairs: <KIND>_i_j with the real shaders and <KIND>BATCH_i_j drawing the same
             // surface again with batched_track.fx, so only the former is exported.
-            var duplicate = node.Id.Contains("BATCH_", StringComparison.Ordinal);
+            var duplicate = node.Id.Contains("BATCH_", StringComparison.Ordinal) ||
+                            (nodeExclude is not null && nodeExclude.Split('|').Any(f => node.Id.EndsWith(f, StringComparison.OrdinalIgnoreCase)));
             if (node is PssgVisibleRenderNode visible && !duplicate &&
                 (nodeFilter is null || nodeFilter.Split('|').Any(f => node.Id.Contains(f, StringComparison.OrdinalIgnoreCase))))
             {
@@ -212,9 +214,9 @@ internal static class PssgMeshExport
                     var primitive = mesh.UsePrimitive(material.Builder);
                     foreach (var (a, b, c) in rds.Triangles())
                     {
-                        var pa = Vector3.Transform(rds.Position(a), world);
-                        var pb = Vector3.Transform(rds.Position(b), world);
-                        var pc = Vector3.Transform(rds.Position(c), world);
+                        var billboard = expandBillboards && shader.ShaderGroup.Contains("foliage_billboard", StringComparison.OrdinalIgnoreCase);
+                        Vector3 P(uint v) => Vector3.Transform(billboard ? rds.Position(v) + new Vector3(rds.Uv(v, 1), 0) : rds.Position(v), world);
+                        var (pa, pb, pc) = (P(a), P(b), P(c));
                         if (keepTriangle is not null && !keepTriangle((pa + pb + pc) / 3f))
                         {
                             continue;

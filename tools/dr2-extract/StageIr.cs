@@ -41,7 +41,7 @@ internal static partial class StageIr
 
     // Also: other routes of the same location (a stage's reverse / sections) whose road the ground, objects and bake must cover too
     private sealed record Options(string OutRoot, float Corridor, SurfaceMap SurfaceMap, bool Render, GroundBakeOptions? Bake, string[] Also,
-        float OrnamentCorridor, string OrnamentFilter, bool Ornaments);
+        float OrnamentCorridor, string OrnamentFilter, bool Ornaments, bool Trees, float TreeCorridor, bool TreeFarLod);
 
     public static async Task<int> Run(string[] args)
     {
@@ -58,7 +58,8 @@ internal static partial class StageIr
             (Program.Option(args, "--also") ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
             float.Parse(Program.Option(args, "--ornament-corridor") ?? "60", CultureInfo.InvariantCulture),
             Program.Option(args, "--ornament-filter") ?? "^rock",
-            !args.Contains("--no-ornaments"));
+            !args.Contains("--no-ornaments"), args.Contains("--trees"),
+            float.Parse(Program.Option(args, "--tree-corridor") ?? "150", CultureInfo.InvariantCulture), args.Contains("--tree-far-lod"));
         var install = await Dr2Install.OpenAsync(root, cache);
 
         if (args.Contains("--all"))
@@ -304,6 +305,14 @@ internal static partial class StageIr
             renderTriangles += ornaments?.RenderTriangles ?? 0;
         }
 
+        TreesResult? trees = null;
+        if (options.Render && options.Trees)
+        {
+            var treeRoutes = new[] { st }.Concat(options.Also.Select(a => st with { Route = int.Parse(StageId().Match(a).Groups["route"].Value, CultureInfo.InvariantCulture) }));
+            trees = await BuildTrees(install, st, options, outDir, lines.ToList(), treeRoutes);
+            renderTriangles += trees?.RenderTriangles ?? 0;
+        }
+
         // Pacenotes: distanceAlongTrack is metres from the start line (see docs/dr2-formats.md).
         var tokens = codriver?.Calls.SelectMany((c, i) => PacenoteNormalizer.Normalize(c, i)).ToList() ?? [];
         foreach (var t in tokens)
@@ -466,6 +475,7 @@ internal static partial class StageIr
             }).ToList(),
             ["objects"] = objects?.Json,
             ["ornaments"] = ornaments?.Json,
+            ["trees"] = trees?.Json,
             ["render"] = renderEntries,
             ["ground_bake"] = groundBake,
             ["validation"] = new
