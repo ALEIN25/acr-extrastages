@@ -82,3 +82,13 @@ by swapping class and template. Reusing HISM exports in the Hafren cells does no
    the ACR mesh's own capsule.
 
 Risks: cluster-tree validity, stale CachedBounds, retoc accepting a new export, the level offset in component-local space.
+
+## In-game result (2026-11-06)
+
+[V in game] Finland 01 r2 with 300 instanced `fin_dougfir_tall_02_a`: ACR loads it, the trees render with their real trunks, branches
+and leaves (no merged real tree stands on that stretch, so these are the instances), about 117-120 FPS. The added component on
+BC_ReplayCamerasActor_C stays loaded and the cloned StaticMesh, its MICs and tangents work. Not looked at yet: the billboard LOD
+switch, and how one leaf per component performs at full scale.
+
+Next: remove the card and stub of instanced trees, then every Finland species (per-species meshes, chunked components, a real cluster
+tree), InvisibleCheck counting instanced trunks as drawn, then trees.bin plants, rocks at full detail and the other locations.
