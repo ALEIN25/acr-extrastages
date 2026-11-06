@@ -132,14 +132,27 @@ internal sealed class Dr2Install
         }
 
         Directory.CreateDirectory(Path.GetDirectoryName(target)!);
-        // OpenWrite does not truncate; a prior partial extract must be removed or the file stays short.
-        if (File.Exists(target))
+        var transformer = new NefsTransformer(new FileSystem());
+        if (temporary)
         {
-            File.Delete(target);
+            await transformer.DetransformAsync(item.DataSource, target, 0, new NefsProgress(CancellationToken.None));
+            return target;
         }
 
-        var transformer = new NefsTransformer(new FileSystem());
-        await transformer.DetransformAsync(item.DataSource, target, 0, new NefsProgress(CancellationToken.None));
+        // Extract to a private name, then move into place: several stages may be prepared at once (launcher), and two
+        // processes fetching the same shared file must never read or write each other's half-written copy.
+        var tmp = $"{target}.{Environment.ProcessId}-{Guid.NewGuid():N}.part";
+        await transformer.DetransformAsync(item.DataSource, tmp, 0, new NefsProgress(CancellationToken.None));
+        try
+        {
+            File.Move(tmp, target, overwrite: true);
+        }
+        catch (IOException) when (File.Exists(target) && new FileInfo(target).Length == item.ExtractedSize)
+        {
+            // another process put a complete copy there first (and may be reading it)
+            File.Delete(tmp);
+        }
+
         return target;
     }
 }

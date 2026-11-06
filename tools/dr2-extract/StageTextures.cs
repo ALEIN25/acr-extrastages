@@ -43,7 +43,9 @@ internal static partial class StageTextures
             .Append("tracksplit.pssg")
             .Concat(install.List($"{st.RouteDir}/").Concat(install.List($"{st.LocDir}/"))
                 .Where(p => p.EndsWith(".pssg", StringComparison.OrdinalIgnoreCase)
-                            && (p.Contains("textures", StringComparison.OrdinalIgnoreCase) || p.EndsWith("/patchup_ot.pssg", StringComparison.OrdinalIgnoreCase))
+                            // patchup_ot.pssg (location) and route_patchup_ot.pssg (route, game_2_1.dat): the full textures that
+                            // the location and route texture files only hold as 4x4 stand-ins
+                            && (p.Contains("textures", StringComparison.OrdinalIgnoreCase) || p.EndsWith("patchup_ot.pssg", StringComparison.OrdinalIgnoreCase))
                             && p.Count(c => c == '/') <= st.RouteDir.Count(c => c == '/') + 1)
                 .Select(p => p[(p.LastIndexOf('/') + 1)..]))
             .Distinct(StringComparer.OrdinalIgnoreCase).ToList();

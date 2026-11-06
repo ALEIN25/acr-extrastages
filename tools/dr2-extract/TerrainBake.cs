@@ -30,10 +30,11 @@ internal sealed record GroundBakeOptions(
     public static GroundBakeOptions Parse(string[] args, float corridor) => new(
         double.Parse(Program.Option(args, "--bake-high-res") ?? "0.05", CultureInfo.InvariantCulture),
         double.Parse(Program.Option(args, "--bake-low-res") ?? "0.5", CultureInfo.InvariantCulture),
-        float.Parse(Program.Option(args, "--bake-high-corridor") ?? "200", CultureInfo.InvariantCulture),
+        // 1024 px tiles in a 25 m corridor: ~8 cm/px next to the road within 200 MB (2048 px tiles over 200 m gave ~20 cm/px in 150 MB)
+        float.Parse(Program.Option(args, "--bake-high-corridor") ?? "25", CultureInfo.InvariantCulture),
         corridor,
-        int.Parse(Program.Option(args, "--bake-tile") ?? "2048", CultureInfo.InvariantCulture),
-        double.Parse(Program.Option(args, "--bake-budget-mb") ?? "150", CultureInfo.InvariantCulture),
+        int.Parse(Program.Option(args, "--bake-tile") ?? "1024", CultureInfo.InvariantCulture),
+        double.Parse(Program.Option(args, "--bake-budget-mb") ?? "200", CultureInfo.InvariantCulture),
         args.Contains("--bake-exclude-road"),
         !args.Contains("--bake-no-decals"),
         Program.Option(args, "--bake-uv") ?? "A");
@@ -52,13 +53,26 @@ internal static class TerrainBake
     private sealed class LayerParams
     {
         public required string Id { get; init; }
-        public required float[] DifUv { get; init; }
-        public required float[] Scale { get; init; }
-        public required float[] Thickness { get; init; }
-        public required string Diffuse { get; init; }
+        public float[] DifUv { get; init; } = [];
+        public float[] Scale { get; init; } = [];
+        public float[] Thickness { get; init; } = [];
+        public string Diffuse { get; init; } = "";
         public string? ColourMap { get; init; }
         public string? Lightmap { get; init; }
+
+        /// <summary>Layered shaders (terrain_road, terrain_wsm_*, terrain_rockbank): Map1..4 diffuse, UV scale.</summary>
+        public bool Layered { get; init; }
+        public string Group { get; init; } = "";
+        public string?[] Maps { get; init; } = [];
+        public float[] MapScale { get; init; } = [];
+
+        /// <summary>DR2's own pre-shaded low-LOD texture of this shader's section (terrain_lod.fx), if found.</summary>
+        public string? LowLod { get; init; }
     }
+
+    /// <summary>The non-array terrain shaders, which carry their layers as separate textures.</summary>
+    private static bool IsLayered(string? group) =>
+        group is "terrain_road.fx" or "terrain_wsm_blend_nm.fx" or "terrain_wsm_edge_nm.fx" or "terrain_rockbank.fx" or "terrain_infield_nm.fx";
 
     private struct TerrainTri
     {
@@ -69,6 +83,7 @@ internal static class TerrainBake
         public Vector2 R0, R1, R2; // ST0.zw
         public Vector2 M0, M1, M2; // ST1.xy: metric mesh UV (1/8 m)
         public Vector2 W0, W1, W2; // ST1.zw: weights of layers b and c
+        public Vector2 Z0, Z1, Z2; // layered shaders: ST1.zw (second atlas UV)
         public float AtlasPerMetre;
     }
 
@@ -86,8 +101,9 @@ internal static class TerrainBake
     private sealed record Tile(string Name, string Tier, double MinX, double MinZ, double Size, int Px, double CoreMinX,
         double CoreMinZ, double CoreSize);
 
+    /// <summary><paramref name="lines"/>: every route the bake covers (this one first, then stage-ir --also); null = this route only.</summary>
     public static async Task<object> Run(Dr2Install install, StageRef st, ProgressTrack progress, string outDir,
-        GroundBakeOptions o)
+        GroundBakeOptions o, IReadOnlyList<IReadOnlyList<Vector3>>? lines = null)
     {
         var timer = Stopwatch.StartNew();
         var dir = Path.Combine(outDir, "render", "ground_bake");
@@ -104,7 +120,8 @@ internal static class TerrainBake
         var pssgPath = $"{st.LocDir}/tracksplit.pssg";
         var pssg = PssgCommands.Open(await install.FetchAsync(pssgPath));
         var textures = new TextureCache(pssg, install, st);
-        var corridor = new RouteCorridor(progress.Gates.Select(g => g.Crossing).ToList(), o.Corridor);
+        lines ??= [progress.Gates.Select(g => g.Crossing).ToList()];
+        var corridor = new RouteCorridor(lines, o.Corridor);
 
         var shaders = new List<LayerParams>();
         var shaderIndex = new Dictionary<PssgShaderInstance, int>();
@@ -113,6 +130,18 @@ internal static class TerrainBake
         var decalTextures = new List<string>();
         var lightmaps = new List<string>();
         var skipped = new Dictionary<string, int>();
+        // DR2's low-LOD terrain shaders (terrain_lod.fx): pre-shaded section textures, by name and by lightmap
+        var lowIds = new List<string>();
+        var lowByLightmap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var sh in pssg.Elements<PssgShaderInstance>().Where(s => s.ShaderGroup.TrimStart('#') == "terrain_lod.fx"))
+        {
+            var defs = sh.TryGetShaderGroup()!.InputDefinitions.ToList();
+            var tx = sh.Inputs.Where(i => i.Type == "texture").ToDictionary(i => defs[(int)i.ParameterId].InputName, i => i.Texture);
+            if (!tx.TryGetValue("TDiffuseAlphaMap", out var d)) continue;
+            lowIds.Add(d);
+            if (tx.TryGetValue("TAmbientOcclusion", out var l)) lowByLightmap.TryAdd(l, d);
+        }
+
         var library = pssg.Elements<PssgLibrary>().First(x => x.Type == "NODE");
         foreach (var root in library.ChildElements.OfType<PssgNode>())
         {
@@ -124,7 +153,8 @@ internal static class TerrainBake
             var world = node.ChildElements.OfType<PssgTransform>().FirstOrDefault()?.Transform * parent ?? parent;
             if (node is PssgVisibleRenderNode visible && !node.Id.Contains("BATCH_", StringComparison.Ordinal))
             {
-                var terrain = node.Id.Contains("SHADOWCASTING_", StringComparison.Ordinal);
+                // HIGH_i_j: full-detail terrain that does not cast shadows (Finland, Scotland), same tier as SHADOWCASTING_
+                var terrain = node.Id.Contains("SHADOWCASTING_", StringComparison.Ordinal) || node.Id.StartsWith("HIGH_", StringComparison.Ordinal);
                 var decal = o.Decals && node.Id.Contains("DECAL_", StringComparison.Ordinal);
                 if (terrain || decal)
                 {
@@ -132,7 +162,8 @@ internal static class TerrainBake
                     {
                         var shader = stream.TryGetShaderInstance();
                         var group = shader?.ShaderGroup.TrimStart('#');
-                        if (shader is null || (terrain && group != "terrain_array.fx") || (decal && group != "decal_ao.fx"))
+                        if (shader is null || (terrain && group != "terrain_array.fx" && !IsLayered(group))
+                                           || (decal && group is not ("decal_ao.fx" or "decal_ao_vc.fx")))
                         {
                             var k = $"{(terrain ? "SHADOWCASTING" : "DECAL")} {group}";
                             skipped[k] = skipped.GetValueOrDefault(k) + 1;
@@ -183,6 +214,31 @@ internal static class TerrainBake
 
             float[] Array25(string prefix, float fallback) =>
                 Enumerable.Range(1, 25).Select(n => constants.GetValueOrDefault($"{prefix}{n}", fallback)).ToArray();
+            var group = shader.ShaderGroup.TrimStart('#');
+            if (IsLayered(group))
+            {
+                // section low-LOD texture: low_*sec_<s>_<nn>_d for the colour map ..._col_<s>_<nn>_cm, else the one sharing the lightmap
+                string? low = null;
+                if (tex.GetValueOrDefault("TColourMap") is { } cmRef
+                    && System.Text.RegularExpressions.Regex.Match(cmRef, @"col_([a-z])_(\d\d)_cm") is { Success: true } cmm)
+                    low = lowIds.FirstOrDefault(x => x.Contains($"sec_{cmm.Groups[1].Value}_{cmm.Groups[2].Value}_d", StringComparison.OrdinalIgnoreCase));
+                if (low is null && tex.GetValueOrDefault("TAmbientOcclusion") is { } lmRef) low = lowByLightmap.GetValueOrDefault(lmRef);
+                shaders.Add(new LayerParams
+                {
+                    Id = shader.Id,
+                    Layered = true,
+                    Group = group,
+                    // Map<n>UVScaleAndOffset: x, y scale (the first input word is enough: x == y on every instance seen)
+                    Maps = Enumerable.Range(1, 4).Select(n => tex.GetValueOrDefault($"TDiffuseSpecMap{n}")).ToArray(),
+                    MapScale = Enumerable.Range(1, 4).Select(n => constants.GetValueOrDefault($"Map{n}UVScaleAndOffset", 1)).ToArray(),
+                    ColourMap = tex.GetValueOrDefault("TColourMap"),
+                    Lightmap = tex.GetValueOrDefault("TAmbientOcclusion"),
+                    LowLod = low,
+                });
+                shaderIndex[shader] = shaders.Count - 1;
+                return shaders.Count - 1;
+            }
+
             shaders.Add(new LayerParams
             {
                 Id = shader.Id,
@@ -192,6 +248,7 @@ internal static class TerrainBake
                 Diffuse = tex.GetValueOrDefault("TDiffuse") ?? throw new InvalidDataException($"{shader.Id}: no TDiffuse"),
                 ColourMap = tex.GetValueOrDefault("TColourMap"),
                 Lightmap = tex.GetValueOrDefault("TAmbientOcclusion"),
+                LowLod = tex.GetValueOrDefault("TAmbientOcclusion") is { } alm ? lowByLightmap.GetValueOrDefault(alm) : null,
             });
             shaderIndex[shader] = shaders.Count - 1;
             return shaders.Count - 1;
@@ -210,13 +267,23 @@ internal static class TerrainBake
                     continue;
                 }
 
-                // docs/dr2-formats.md: Color G,B,A bytes are slice×8+3 for layers a,b,c (R unused here).
-                var col = rds.Raw("Color", 0, a);
-                static byte Layer(float channel) => (byte)Math.Max(0, ((int)channel - 3) / 8);
-                (t.La, t.Lb, t.Lc) = (Layer(col.Y), Layer(col.Z), Layer(col.W));
-                Fill(rds, a, out t.A0, out t.R0, out t.M0, out t.W0);
-                Fill(rds, b, out t.A1, out t.R1, out t.M1, out t.W1);
-                Fill(rds, c, out t.A2, out t.R2, out t.M2, out t.W2);
+                if (shaders[shader].Layered)
+                {
+                    FillLayered(rds, a, t.P0, out t.A0, out t.Z0, out t.R0, out t.M0, out t.W0);
+                    FillLayered(rds, b, t.P1, out t.A1, out t.Z1, out t.R1, out t.M1, out t.W1);
+                    FillLayered(rds, c, t.P2, out t.A2, out t.Z2, out t.R2, out t.M2, out t.W2);
+                }
+                else
+                {
+                    // docs/dr2-formats.md: Color G,B,A bytes are slice×8+3 for layers a,b,c (R unused here).
+                    var col = rds.Raw("Color", 0, a);
+                    static byte Layer(float channel) => (byte)Math.Max(0, ((int)channel - 3) / 8);
+                    (t.La, t.Lb, t.Lc) = (Layer(col.Y), Layer(col.Z), Layer(col.W));
+                    Fill(rds, a, out t.A0, out t.R0, out t.M0, out t.W0);
+                    Fill(rds, b, out t.A1, out t.R1, out t.M1, out t.W1);
+                    Fill(rds, c, out t.A2, out t.R2, out t.M2, out t.W2);
+                }
+
                 var area = Vector3.Cross(t.P1 - t.P0, t.P2 - t.P0).Length() / 2;
                 var uvArea = MathF.Abs(Cross(t.A1 - t.A0, t.A2 - t.A0)) / 2;
                 t.AtlasPerMetre = area > 1e-6f ? MathF.Sqrt(uvArea / area) : 0;
@@ -271,28 +338,32 @@ internal static class TerrainBake
             }
         }
 
-        Console.WriteLine($"ground bake: {tris.Count} terrain triangles ({shaders.Count} terrain_array shaders), " +
+        Console.WriteLine($"ground bake: {tris.Count} terrain triangles ({shaders.Count(s => !s.Layered)} terrain_array, " +
+                          $"{shaders.Count(s => s.Layered)} layered shaders, {shaders.Count(s => s.Layered && s.LowLod is not null)} with a low-LOD texture), " +
                           $"{decals.Count} decal triangles within {o.Corridor} m; skipped instances: " +
                           (skipped.Count == 0 ? "none" : string.Join(", ", skipped.Select(s => $"{s.Key} x{s.Value}"))));
         if (tris.Count == 0)
         {
-            throw new InvalidDataException("ground bake: no terrain_array triangles in the corridor");
+            throw new InvalidDataException("ground bake: no terrain_array or layered terrain triangles in the corridor");
         }
 
         // Textures: every terrain_array shader of this location shares one diffuse array (checked here).
-        var arrays = shaders.Select(s => s.Diffuse).Distinct().ToList();
-        if (arrays.Count != 1)
+        var arrays = shaders.Where(s => !s.Layered).Select(s => s.Diffuse).Distinct().ToList();
+        if (arrays.Count > 1)
         {
             throw new NotSupportedException($"ground bake: {arrays.Count} different TDiffuse arrays ({string.Join(", ", arrays)})");
         }
 
-        var slices = textures.Array(arrays[0]);
+        var slices = arrays.Count == 1 ? textures.Array(arrays[0]) : [];
         var colourMaps = shaders.Select(s => s.ColourMap is null ? null : textures.Get(s.ColourMap)).ToArray();
         var shaderLightmaps = shaders.Select(s => s.Lightmap is null ? null : textures.Get(s.Lightmap)).ToArray();
+        var layerMaps = shaders.Select(s => s.Maps.Select(m => m is null ? null : textures.Get(m)).ToArray()).ToArray();
+        var lowLods = MatchLowLods(shaders, tris, colourMaps, lowIds.Distinct().ToDictionary(x => x, x => textures.Get(x)));
         var decalTex = decalTextures.Select(textures.Get).ToArray();
         var decalLm = lightmaps.Select(textures.Get).ToArray();
-        var maxLayer = tris.Max(t => Math.Max(t.La, Math.Max(t.Lb, t.Lc)));
-        if (maxLayer >= slices.Length)
+        var arrayTris = tris.Where(t => !shaders[t.Shader].Layered).ToList();
+        var maxLayer = arrayTris.Count == 0 ? 0 : arrayTris.Max(t => Math.Max(t.La, Math.Max(t.Lb, t.Lc)));
+        if (slices.Length > 0 && maxLayer >= slices.Length)
         {
             // Rare out-of-range Color encodings (seen on poland_rally_01); clamp so bake can proceed.
             var clamped = 0;
@@ -307,13 +378,14 @@ internal static class TerrainBake
             }
 
             Console.WriteLine($"ground bake: warning: layer index {maxLayer} >= {slices.Length} slices; clamped {clamped} vertex refs");
+            arrayTris = tris.Where(t => !shaders[t.Shader].Layered).ToList();   // the copies taken above still hold the unclamped layers
         }
 
         // Road layers: slices whose area lies mostly on the road band (within the gates' left/right edges + 1 m).
         var band = new RoadBand(progress, 1f);
         var sliceArea = new double[slices.Length];
         var sliceRoad = new double[slices.Length];
-        foreach (var t in tris)
+        foreach (var t in arrayTris)
         {
             var area = Vector3.Cross(t.P1 - t.P0, t.P2 - t.P0).Length() / 2;
             var onRoad = band.Contains((t.P0 + t.P1 + t.P2) / 3);
@@ -328,7 +400,7 @@ internal static class TerrainBake
         }
 
         var roadLayers = Enumerable.Range(0, slices.Length).Where(l => sliceArea[l] > 0 && sliceRoad[l] / sliceArea[l] > 0.6).ToHashSet();
-        var fallbackLayer = Enumerable.Range(0, slices.Length).Where(l => !roadLayers.Contains(l)).MaxBy(l => sliceArea[l]);
+        var fallbackLayer = slices.Length == 0 ? 0 : Enumerable.Range(0, slices.Length).Where(l => !roadLayers.Contains(l)).MaxBy(l => sliceArea[l]);
         Console.WriteLine("ground bake: layer use (m², share on the road band): " + string.Join(" ",
             Enumerable.Range(0, slices.Length).Where(l => sliceArea[l] > 0)
                 .Select(l => $"{l}:{sliceArea[l]:F0}/{sliceRoad[l] / sliceArea[l]:P0}{(roadLayers.Contains(l) ? "*" : "")}")));
@@ -355,7 +427,6 @@ internal static class TerrainBake
             Vector2.Max(Xz(t.P0), Vector2.Max(Xz(t.P1), Xz(t.P2))))).ToList(), 32);
         var decalGrid = new TriGrid(decals.Select(t => (Vector2.Min(Xz(t.P0), Vector2.Min(Xz(t.P1), Xz(t.P2))),
             Vector2.Max(Xz(t.P0), Vector2.Max(Xz(t.P1), Xz(t.P2))))).ToList(), 32);
-        var centre = progress.Gates.Select(g => g.Crossing).ToList();
 
         List<Tile> Layout(string tier, double res, Func<double, double, double, bool> keep)
         {
@@ -386,6 +457,7 @@ internal static class TerrainBake
         bool NearRoute(double x, double z, double size)
         {
             var r = o.HighCorridor;
+            foreach (var centre in lines)
             for (var i = 0; i + 1 < centre.Count; i++)
             {
                 var a = centre[i];
@@ -431,7 +503,7 @@ internal static class TerrainBake
             var g = progress.GateOf("start").Crossing;
             var (px, pz, size) = p.Length == 3 ? (p[0], p[1], p[2]) : (g.X, g.Z, p.Length == 1 ? p[0] : 80);
             var probeCtx = new Shading(tris, decals, shaders, slices, colourMaps, shaderLightmaps, decalTex, decalLm,
-                roadLayers, fallbackLayer, o);
+                roadLayers, fallbackLayer, o, layerMaps, lowLods);
             var n = (int)(size / 0.05);
             var (img, mask) = probeCtx.BakeTile(px - size / 2, pz - size / 2, 0.05, n, triGrid, decalGrid);
             var file = Path.Combine(dir, $"probe_{o.UvMode}{(o.Decals ? "" : "_nodecals")}{(o.ExcludeRoad ? "_noroad" : "")}.png");
@@ -443,7 +515,7 @@ internal static class TerrainBake
         }
 
         var ctx = new Shading(tris, decals, shaders, slices, colourMaps, shaderLightmaps, decalTex, decalLm, roadLayers,
-            fallbackLayer, o);
+            fallbackLayer, o, layerMaps, lowLods);
         var manifestTiles = new List<object>();
         var lowImages = new Dictionary<Tile, Image<Rgb24>>();
         var startGate = progress.GateOf("start").Crossing;
@@ -585,6 +657,65 @@ internal static class TerrainBake
         };
     }
 
+    /// <summary>
+    /// Which DR2 low-LOD texture belongs to each shader's section atlas, checked by content instead of trusted by name
+    /// (Finland 01: some low_*sec_* names do not match the col_*_cm / lightmap of the section they shade, and the wrong
+    /// texture smeared other sections' colours, grass included, over Naarajärvi's road). At up to 96 atlas UVs of the
+    /// shader's triangles, the brightness of every candidate is correlated with the section's colour map (same atlas);
+    /// the best candidate is used if its correlation is at least MinLowCorrelation and it is not mostly gutter there,
+    /// else the shader falls back to the colour-map shading.
+    /// </summary>
+    private static BakeTextureImage?[] MatchLowLods(List<LayerParams> shaders, List<TerrainTri> tris, BakeTextureImage?[] colourMaps,
+        Dictionary<string, BakeTextureImage?> candidates)
+    {
+        var result = new BakeTextureImage?[shaders.Count];
+        var samples = new List<Vector2>[shaders.Count];
+        for (var i = 0; i < shaders.Count; i++) samples[i] = new List<Vector2>();
+        var step = Math.Max(1, tris.Count / 200_000);
+        for (var k = 0; k < tris.Count; k += step)
+        {
+            var t = tris[k];
+            var s = samples[t.Shader];
+            if (s.Count < 96) s.Add((t.A0 + t.A1 + t.A2) / 3);
+        }
+
+        int byName = 0, changed = 0, none = 0;
+        for (var i = 0; i < shaders.Count; i++)
+        {
+            var cm = colourMaps[i];
+            var pts = samples[i];
+            if (cm is null || pts.Count < 8 || candidates.Count == 0) continue;
+            static float Lum(Vector4 c) => 0.3f * c.X + 0.59f * c.Y + 0.11f * c.Z;
+            var cmL = pts.Select(p => Lum(cm.Sample(p, 2, false))).ToArray();
+            (string? id, double r) best = (null, double.MinValue);
+            foreach (var (id, tex) in candidates)
+            {
+                if (tex is null) continue;
+                var vals = pts.Select(p => tex.Sample(p, 0, false)).ToArray();
+                if (vals.Count(v => v.X + v.Y + v.Z < 0.03f) > pts.Count / 3) continue;   // mostly gutter: not this atlas
+                var r = Correlation(cmL, vals.Select(Lum).ToArray());
+                if (r > best.r) best = (id, r);
+            }
+
+            if (best.id is null || best.r < MinLowCorrelation) { none++; continue; }
+            result[i] = candidates[best.id];
+            if (string.Equals(best.id, shaders[i].LowLod, StringComparison.OrdinalIgnoreCase)) byName++; else changed++;
+        }
+
+        Console.WriteLine($"ground bake: low-LOD textures matched by content: {byName} as named, {changed} corrected, {none} without a matching one (colour-map shading)");
+        return result;
+    }
+
+    /// <summary>Pearson correlation; 0 when either side is flat.</summary>
+    private static double Correlation(float[] a, float[] b)
+    {
+        double ma = a.Average(), mb = b.Average(), sab = 0, saa = 0, sbb = 0;
+        for (var i = 0; i < a.Length; i++) { sab += (a[i] - ma) * (b[i] - mb); saa += (a[i] - ma) * (a[i] - ma); sbb += (b[i] - mb) * (b[i] - mb); }
+        return saa < 1e-9 || sbb < 1e-9 ? 0 : sab / Math.Sqrt(saa * sbb);
+    }
+
+    private const double MinLowCorrelation = 0.3;
+
     private static bool InCore(Tile t, Vector3 c) =>
         c.X >= t.CoreMinX && c.Z >= t.CoreMinZ && c.X < t.CoreMinX + t.CoreSize && c.Z < t.CoreMinZ + t.CoreSize;
 
@@ -615,6 +746,31 @@ internal static class TerrainBake
         other = new Vector2(st0.Z, st0.W);
         mesh = new Vector2(st1.X, st1.Y);
         weights = new Vector2(st1.Z, st1.W);
+    }
+
+    /// <summary>
+    /// Layered terrain vertex (Finland, ...): ST0 = (road-aligned u, v, metric u, v), ST1 = (section atlas u, v, second atlas
+    /// u, v), Color byte 1 = layer 2 weight. terrain_infield_nm (Germany's fields) has a single ST stream holding only the
+    /// atlas (xy and zw both 0..1): its detail layers tile on world X/Z at BaseUvScale (8 m per unit), like terrain_array.
+    /// </summary>
+    private static void FillLayered(RdsReader rds, uint v, Vector3 world, out Vector2 atlas, out Vector2 atlas2, out Vector2 along, out Vector2 metric, out Vector2 weights)
+    {
+        var st0 = rds.Raw("ST", 0, v);
+        var col = rds.Raw("Color", 0, v);
+        weights = new Vector2(col.Y / 255f, col.W / 255f);
+        if (rds.Layout.Count(l => l.RenderType == "ST") < 2)
+        {
+            atlas = new Vector2(st0.X, st0.Y);
+            atlas2 = new Vector2(st0.Z, st0.W);
+            along = metric = new Vector2(world.X, world.Z) * BaseUvScale;
+            return;
+        }
+
+        var st1 = rds.Raw("ST", 1, v);
+        along = new Vector2(st0.X, st0.Y);
+        metric = new Vector2(st0.Z, st0.W);
+        atlas = new Vector2(st1.X, st1.Y);
+        atlas2 = new Vector2(st1.Z, st1.W);
     }
 
     private static Vector2 Xz(Vector3 p) => new(p.X, p.Z);
@@ -776,9 +932,14 @@ internal static class TerrainBake
         BakeTextureImage?[] decalLightmaps,
         HashSet<int> roadLayers,
         int fallbackLayer,
-        GroundBakeOptions o)
+        GroundBakeOptions o,
+        BakeTextureImage?[][] layerMaps,
+        BakeTextureImage?[] lowLods)
     {
         private readonly float[] _meanHeight = slices.Select(s => s.MeanAlpha).ToArray();
+
+        /// <summary>DR2_BAKE_LAYERED (diagnostic): low | low_zw | cm | detail | full (default).</summary>
+        private static readonly string Debug = Environment.GetEnvironmentVariable("DR2_BAKE_LAYERED") ?? "full";
 
         public (Image<Rgb24> Colour, Image<L8> Road) BakeTile(double minX, double minZ, double res, int n, TriGrid grid, TriGrid decalGrid)
         {
@@ -850,6 +1011,7 @@ internal static class TerrainBake
                     colour[k] = Srgb(c);
                 }
             });
+            Dilate(colour, ids, n, DilatePx);
             for (var j = 0; j < n / 4; j++)
             {
                 for (var i = 0; i < n / 4; i++)
@@ -870,9 +1032,76 @@ internal static class TerrainBake
             return (Image.LoadPixelData<Rgb24>(colour, n, n), Image.LoadPixelData<L8>(road, n / 4, n / 4));
         }
 
+        /// <summary>
+        /// Layered shaders: detail = Map1 (on the road-aligned ST0.xy) blended into Map2 (on ST0.zw) by vertex colour byte 1;
+        /// the large-scale colour is DR2's own pre-shaded low-LOD texture on the section atlas (ST1.xy), so the detail only adds
+        /// what is finer than it: final = low × detail / mean(detail textures). Without a low-LOD texture: detail × 2 colour
+        /// map × 2 lightmap, as for terrain_array.
+        /// </summary>
+        private (Vector3 Colour, float Road) ShadeLayered(in TerrainTri t, float w0, float w1, float w2, float x, float z, float res)
+        {
+            var sh = shaders[t.Shader];
+            var atlas = t.A0 * w0 + t.A1 * w1 + t.A2 * w2;
+            var atlas2 = t.Z0 * w0 + t.Z1 * w1 + t.Z2 * w2;
+            var along = t.R0 * w0 + t.R1 * w1 + t.R2 * w2;
+            var metric = t.M0 * w0 + t.M1 * w1 + t.M2 * w2;
+            var wt = t.W0 * w0 + t.W1 * w1 + t.W2 * w2;
+            var maps = layerMaps[t.Shader];
+            var low = lowLods[t.Shader];
+            Vector3 At(BakeTextureImage? tex, Vector2 uv, float atlasScale)
+            {
+                if (tex is null) return Vector3.One * 0.5f;
+                var s = tex.Sample(uv, MathF.Log2(MathF.Max(1, tex.Width * atlasScale * res)), false);
+                return new Vector3(s.X, s.Y, s.Z);
+            }
+
+            switch (Debug)
+            {
+                case "low": return (At(low, atlas, t.AtlasPerMetre), 0);
+                case "low_zw": return (At(low, atlas2, t.AtlasPerMetre), 0);
+                case "cm": return (At(colourMaps[t.Shader], atlas, t.AtlasPerMetre), 0);
+            }
+
+            Vector3 detail = default, mean = default;
+            var w2nd = Math.Clamp(wt.X, 0, 1);
+            for (var k = 0; k < 2; k++)
+            {
+                var tex = maps.Length > k ? maps[k] : null;
+                var weight = k == 0 ? 1 - w2nd : w2nd;
+                if (tex is null || weight <= 1e-4f) continue;   // the ratio below normalises whatever is left
+
+                var uv = (k == 0 ? along : metric) * sh.MapScale[k];
+                var perMetre = (k == 0 ? 0.17f : 0.12f) * sh.MapScale[k];
+                var c = tex.Sample(uv, MathF.Log2(MathF.Max(1, tex.Width * perMetre * res)), true);
+                detail += new Vector3(c.X, c.Y, c.Z) * weight;
+                mean += tex.MeanRgb * weight;
+            }
+
+            if (mean == default)
+            {
+                detail = Vector3.One * 0.5f;
+                mean = detail;
+            }
+
+            var road = sh.Group == "terrain_road.fx" ? 1 - w2nd : 0;
+            if (Debug == "detail") return (detail, road);
+            if (low is not null && !InGutter(low, atlas))
+            {
+                var ratio = Vector3.Clamp(detail / Vector3.Max(mean, new Vector3(0.02f)), Vector3.Zero, new Vector3(3));
+                var ls = low.Sample(atlas, 0, false);   // mip 0: lower mips average the black atlas gutters into dark bands
+                return (new Vector3(ls.X, ls.Y, ls.Z) * ratio, road);
+            }
+
+            var colour = detail;
+            if (colourMaps[t.Shader] is { } cm) colour *= 2 * At(cm, atlas, t.AtlasPerMetre);
+            if (lightmaps[t.Shader] is { } lm) colour *= 2 * At(lm, atlas, t.AtlasPerMetre);
+            return (colour, road);
+        }
+
         private (Vector3 Colour, float Road) ShadeTerrain(in TerrainTri t, float w0, float w1, float w2, float x, float z, float res)
         {
             var sh = shaders[t.Shader];
+            if (sh.Layered) return ShadeLayered(t, w0, w1, w2, x, z, res);
             var atlas = t.A0 * w0 + t.A1 * w1 + t.A2 * w2;
             var mesh = t.M0 * w0 + t.M1 * w1 + t.M2 * w2;
             var other = t.R0 * w0 + t.R1 * w1 + t.R2 * w2;
@@ -946,6 +1175,25 @@ internal static class TerrainBake
             colour /= sum;
             road /= sum;
 
+            // DR2's own low-LOD texture on the same section atlas, when there is one: large-scale colour from it, the array
+            // layers only add what is finer (as in ShadeLayered)
+            if (lowLods[t.Shader] is { } low && Debug != "nolow" && !InGutter(low, atlas))
+            {
+                Vector3 mean = default;
+                for (var l = 0; l < 3; l++)
+                {
+                    var b = MathF.Max(scores[l] - (best - BlendDepth), 0);
+                    if (b > 0) mean += slices[layer[l]].MeanRgb * b;
+                }
+
+                mean /= sum;
+                // mip 0 always: lower mips average the atlas's black gutters into dark bands on the coarse tiles
+                var ls = low.Sample(atlas, 0, false);
+                if (Debug == "low") return (new Vector3(ls.X, ls.Y, ls.Z), road);
+                var ratio = Vector3.Clamp(colour / Vector3.Max(mean, new Vector3(0.02f)), Vector3.Zero, new Vector3(3));
+                return (new Vector3(ls.X, ls.Y, ls.Z) * ratio, excluded == 3 ? 0 : road);
+            }
+
             var cm = colourMaps[t.Shader];
             if (cm is not null)
             {
@@ -984,6 +1232,60 @@ internal static class TerrainBake
             }
 
             return Vector3.Lerp(under, colour, Math.Clamp(c.W, 0, 1));
+        }
+
+        /// <summary>
+        /// DR2's low-LOD textures are atlases with black gutters between the islands; a triangle whose atlas UV lands in one
+        /// (seen along road edges) must not take the low-LOD colour. Checked on the full-resolution texel, any channel lit.
+        /// </summary>
+        private static bool InGutter(BakeTextureImage low, Vector2 atlas)
+        {
+            var s = low.Sample(atlas, 0, false);
+            return s.X + s.Y + s.Z < 0.03f;
+        }
+
+        /// <summary>Texture padding: pixels with no DR2 terrain under them are filled from their baked neighbours.</summary>
+        private const int DilatePx = 96;
+
+        /// <summary>
+        /// Pixels with no terrain triangle (ids &lt; 0, black) take the mean of their filled 8-neighbours, ring by ring, up to
+        /// `passes` pixels out. The drawn ground is not DR2's render terrain everywhere (the collision road is wider than the
+        /// painted road at places, collision fill, low-LOD seams), and black there showed as dark bands and "holes" in game.
+        /// </summary>
+        private static void Dilate(Rgb24[] colour, int[] ids, int n, int passes)
+        {
+            var filled = new bool[n * n];
+            for (var k = 0; k < filled.Length; k++) filled[k] = ids[k] >= 0;
+            // frontier: empty pixels next to a filled one; each ring only looks at the previous ring's neighbours
+            var ring = new HashSet<int>();
+            void Neighbours(int k, Action<int> f)
+            {
+                int i = k % n, j = k / n;
+                for (var dj = -1; dj <= 1; dj++)
+                    for (var di = -1; di <= 1; di++)
+                    {
+                        int x = i + di, y = j + dj;
+                        if ((di | dj) != 0 && x >= 0 && y >= 0 && x < n && y < n) f(y * n + x);
+                    }
+            }
+
+            for (var k = 0; k < filled.Length; k++)
+                if (filled[k]) Neighbours(k, q => { if (!filled[q]) ring.Add(q); });
+            var next = new List<(int k, Rgb24 c)>();
+            for (var pass = 0; pass < passes && ring.Count > 0; pass++)
+            {
+                next.Clear();
+                foreach (var k in ring)
+                {
+                    int r = 0, g = 0, b = 0, c = 0;
+                    Neighbours(k, q => { if (filled[q]) { var p = colour[q]; r += p.R; g += p.G; b += p.B; c++; } });
+                    if (c > 0) next.Add((k, new Rgb24((byte)(r / c), (byte)(g / c), (byte)(b / c))));
+                }
+
+                foreach (var (k, c) in next) { colour[k] = c; filled[k] = true; }
+                ring.Clear();
+                foreach (var (k, _) in next) Neighbours(k, q => { if (!filled[q]) ring.Add(q); });
+            }
         }
 
         /// <summary>Weight of a layer's height (slice alpha minus its mean) against its vertex weight, times Thickness.</summary>
@@ -1139,6 +1441,7 @@ internal sealed class BakeTextureImage
         // which DR2 multiplies by 2 and which only stay neutral at 0.5 if read as linear data.
         var id = texture.Id;
         var data = id.Contains("colourmap", StringComparison.OrdinalIgnoreCase) || id.EndsWith("_lm.tga", StringComparison.OrdinalIgnoreCase)
+                   || id.EndsWith("_cm.tga", StringComparison.OrdinalIgnoreCase)
                    || id.Contains("_lm", StringComparison.OrdinalIgnoreCase) || IsSectionColourMap(id);
         return new BakeTextureImage(rgba, (int)dds.header.dwWidth, (int)dds.header.dwHeight, !data);
     }

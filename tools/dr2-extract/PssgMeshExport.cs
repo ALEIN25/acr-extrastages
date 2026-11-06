@@ -169,7 +169,7 @@ internal static class PssgMeshExport
             // surface again with batched_track.fx, so only the former is exported.
             var duplicate = node.Id.Contains("BATCH_", StringComparison.Ordinal);
             if (node is PssgVisibleRenderNode visible && !duplicate &&
-                (nodeFilter is null || node.Id.Contains(nodeFilter, StringComparison.OrdinalIgnoreCase)))
+                (nodeFilter is null || nodeFilter.Split('|').Any(f => node.Id.Contains(f, StringComparison.OrdinalIgnoreCase))))
             {
                 ExportRenderNode(visible, world, target);
             }
