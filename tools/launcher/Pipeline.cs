@@ -79,6 +79,10 @@ internal sealed class Pipeline
         _total = plan.Count * 2 + 5;
         _done = 0;
         var cfg = StagesConfig.Load(_l.StagesToml);
+        // pairs (config/variants.toml): a selected reverse stage is built as the reverse variant of its forward stage's container
+        var pairs = Pairs.Load(_l, cfg);
+        var byDr2 = cfg.Entries().ToDictionary(e => e.Dr2, StringComparer.OrdinalIgnoreCase);
+        plan = plan.Select(st => pairs.ForwardOf(st.Dr2) is { } f ? byDr2[f] : st).DistinctBy(st => st.Id).ToList();
 
         // ---- mappings -----------------------------------------------------------------------------------------------------
         Ui.Head("Mappings");
@@ -98,23 +102,29 @@ internal sealed class Pipeline
             try { Prepare.MenuArt(_c, log); }
             catch (StepFailed e) { Ui.Warn($"  DR2 loading art: {e.Message} (menu backdrops keep the template's)"); }
         }
-        var prep = new Dictionary<string, Prepare.Row>();
+        // several stages at once (--jobs); stages of one DR2 location share its extracted archive cache, so each location's
+        // stages go one after another in the same worker
+        int jobs = _c.EffectiveJobs;
+        _c.P.Quiet = jobs > 1;
+        var prep = new System.Collections.Concurrent.ConcurrentDictionary<string, Prepare.Row>();
         int pi = 0;
-        foreach (var st in plan)
+        Parallel.ForEach(plan.GroupBy(st => st.LocationKey), new ParallelOptions { MaxDegreeOfParallelism = jobs }, group =>
         {
-            pi++;
-            using var plog = Append(Path.Combine(_l.Logs, $"prepare-{st.Id}.log"));
-            var r = Prepare.Stage(_c, st, plog);
-            prep[st.Dr2] = r;
-            _done++;
-            var what = !r.Ok ? $"FAILED: {r.Error}" : r.Steps.Contains("skip") ? $"ready (bake {r.Bake})" : $"prepared in {r.Seconds} s (bake {r.Bake})";
-            Progress($"prepare {pi}/{plan.Count} {st.Id}: {what}");
-        }
-        Files.WriteJson(Path.Combine(_l.Batch, "prepare-data.json"), prep.Values.ToList());
+            foreach (var st in group)
+            {
+                Prepare.Row r;
+                using (var plog = Append(Path.Combine(_l.Logs, $"prepare-{st.Id}.log"))) r = Prepare.Stage(_c, st, plog, pairs.ReverseOf(st.Dr2));
+                prep[st.Dr2] = r;
+                Interlocked.Increment(ref _done);
+                var what = !r.Ok ? $"FAILED: {r.Error}" : r.Steps.Contains("skip") ? $"ready (bake {r.Bake})" : $"prepared in {r.Seconds} s (bake {r.Bake})";
+                Progress($"prepare {Interlocked.Increment(ref pi)}/{plan.Count} {st.Id}: {what}");
+            }
+        });
+        Files.WriteJson(Path.Combine(_l.Batch, "prepare-data.json"), plan.Where(st => prep.ContainsKey(st.Dr2)).Select(st => prep[st.Dr2]).ToList());
 
         // ---- specs, vanilla inputs, fit -------------------------------------------------------------------------------------
         Ui.Head("Build inputs");
-        var specs = Specs.Generate(_c, cfg, log);
+        var specs = Specs.Generate(_c, cfg, log, pairs);
         Ui.Line($"  {specs.Count} stage spec(s) in {_l.Specs}");
         _done++;
         var vanilla = Vanilla.NewView(_c.AcrDir!, Path.Combine(_l.Additive, "vanilla"), log);
@@ -182,18 +192,23 @@ internal sealed class Pipeline
                 row.input_hash = Files.HashText(string.Join("|",
                     "spec=" + Files.ContentHash(specs[p.Id].File), "ir=" + Files.FileSig(Path.Combine(ir, "stage.json")),
                     "terrain=" + Files.FileSig(Path.Combine(ir, "render", "terrain.glb")), "bake=" + Files.FileSig(bake),
-                    $"cfg={configSig}", $"tools={toolSig}", $"script={PipelineVersion}", $"vanilla={vanillaSig}"));
+                    $"cfg={configSig}", $"tools={toolSig}", $"script={PipelineVersion}", $"vanilla={vanillaSig}")
+                    // a pair also depends on its reverse route and the variant settings (single stages keep their hash)
+                    + (specs[p.Id].Reverse is { } rv ? "|rev=" + Files.FileSig(Path.Combine(_l.IrRoot, rv, "stage.json")) + "|variants=" + Files.ContentHash(Pairs.File(_l)) : ""));
                 row.status = "todo";
             }
             rows.Add(row);
         }
 
         // ---- build ------------------------------------------------------------------------------------------------------------
-        Ui.Head($"Building {rows.Count(r => r.status == "todo")} stage(s)");
-        int n = 0;
-        foreach (var r in rows)
+        Ui.Head($"Building {rows.Count(r => r.status == "todo")} stage(s){(jobs > 1 ? $", {jobs} at a time" : "")}");
+        var buildClock = System.Diagnostics.Stopwatch.StartNew();
+        // every stage has its own scratch folders, log, state file and container: they build side by side (--jobs)
+        Parallel.ForEach(rows.Select((r, i) => (r, n: i + 1)), new ParallelOptions { MaxDegreeOfParallelism = jobs }, x => BuildOne(x.r, x.n));
+        Ui.Line($"  {rows.Count(r => r.status == "built")} built in {(int)buildClock.Elapsed.TotalSeconds} s");
+
+        void BuildOne(Row r, int n)
         {
-            n++;
             var idl = r.id.ToLowerInvariant();
             var container = Path.Combine(_l.Dist, $"zz_acrxs_s_{idl}_P.utoc");
             var stFile = Path.Combine(_l.State, idl + ".json");
@@ -201,17 +216,18 @@ internal sealed class Pipeline
             {
                 // not buildable now: never leave an old container for the registry to pick up
                 Files.DeleteMatching(_l.Dist, $"zz_acrxs_s_{idl}_P.*");
-                _done++;
+                Interlocked.Increment(ref _done);
                 Progress($"{n}/{rows.Count} {r.id}: {r.status} - {r.reason}");
-                continue;
+                return;
             }
             var prev = ReadState(stFile);
-            if (!_c.Force && prev is { ok: true } && prev.input_hash == r.input_hash && File.Exists(container))
+            if (!_c.Force && prev is { ok: true } && prev.input_hash == r.input_hash && File.Exists(container)
+                && (!_c.Preview || File.Exists(Path.Combine(_l.Preview, r.id, "preview.glb"))))
             {
                 r.status = "unchanged";
-                _done++;
+                Interlocked.Increment(ref _done);
                 Progress($"{n}/{rows.Count} {r.id}: unchanged (inputs identical, container present)");
-                continue;
+                return;
             }
             var logPath = Path.Combine(_l.Logs, r.id + ".log");
             var sw = System.Diagnostics.Stopwatch.StartNew();
@@ -254,7 +270,7 @@ internal sealed class Pipeline
                 }
             }
             Files.WriteJson(stFile, new StageState { input_hash = r.input_hash, ok = r.status == "built", at = DateTime.Now.ToString("s") });
-            _done++;
+            Interlocked.Increment(ref _done);
             Progress($"{n}/{rows.Count} {r.id}: {r.status} in {r.seconds} s{(r.reason is null ? "" : ": " + r.reason)}");
         }
 
@@ -367,11 +383,15 @@ internal sealed class Pipeline
             (@"acr\Content\Levels\WalesS4HafrenSouth\_Generated_\22VG0QIP9ATUQI633K86KWPFP", null),
             (@"acr\Content\Data\Database\Main\TrackSelection\DT_TracksVariants", null),
             (@"acr\Content\Data\Pacenote\Tables\DT_PacenoteHafrenSouthForward", null),
+            (@"acr\Content\Levels\WalesS4HafrenSouth\_Generated_\7FF9A0XR2HIRJVFZU6AEAFHMU", null),   // reverse variant (pairs)
+            (@"acr\Content\Data\Pacenote\Tables\DT_PacenoteHafrenSouthReverse", null),
             (@"acr\Content\Levels\WalesS4HafrenSouth", "WalesS4HafrenSouth.umap"),   // the bare name would match all of its cells
             (@"acr\Content\Data\Localization\ContentTexts\ST_Track", null),
             (@"acr\Content\Materials\PhotoMode\Textures\T_Dirt", null),
             (@"acr\Content\Effects\Vehicles\Skid\T_SkidDebug_N", null),
             (@"acr\Content\Environments\MonteCarloS2Sisteron\TileableMaterials\MI_SisteronConcrete01", null),
+            (@"acr\Content\Props\MonteCarloProps\MOnBolStoneWallB\MI_MonBolStoneWallC", null),   // M_Simple with a detail normal (ground bake)
+            (@"acr\Content\Props\AlsaceBuildings\FraChaBldWarehouseA\MI_FraChaBldWarehouseAProps04_OP", null),   // masked, two-sided (cut-out textures)
         };
         foreach (var (rel, filter) in host)
         {
@@ -413,7 +433,7 @@ internal sealed class Pipeline
             "--respawn", "relay",
             "--scenery", cfg("scenery.toml"), "--scenery-actor-hidden", "1",
             "--visuals", cfg("visuals.toml"), "--visuals-host", "start", "--visuals-retarget", "1",
-            "--visuals-vegetation", "none", "--visuals-vista", "1", "--visuals-textured", "1",
+            "--visuals-vegetation", "cards", "--visuals-vista", "1", "--visuals-textured", "1",
             "--visuals-dr2", "1", "--visuals-canopies", "apex", "--visuals-terrain-uv", "box",
             "--visuals-ground", "render", "--visuals-ground-lod", "1",
             "--sky", cfg("sky.toml"), "--sky-section", s.Sky,
@@ -421,6 +441,10 @@ internal sealed class Pipeline
             "--bounds", "1",
         };
         if (s.GroundOffset != 0) sb.AddRange(new[] { "--ground-offset", s.GroundOffset.ToString(Inv) });
+        if (s.Road == "acr") sb.AddRange(new[] { "--visuals-dr2-revert", "road" });
+        else if (s.Road != "dr2") sb.AddRange(new[] { "--visuals-road-bake", "1" });   // used when the stage has a ground bake
+        if (_c.Preview) sb.AddRange(new[] { "--visuals-preview", Path.Combine(_l.Preview, id) });
+        if (s.Reverse is { } reverse) sb.AddRange(new[] { "--reverse-ir", Path.Combine(_l.IrRoot, reverse), "--variants", Pairs.File(_l) });
         var bake = Path.Combine(ir, "render", "ground_bake", "manifest.json");
         if (File.Exists(bake)) sb.AddRange(new[] { "--visuals-ground-bake", bake });
         _c.P.Must(_acrRef, sb, log, $"{label}: stage-build");
@@ -451,6 +475,7 @@ internal sealed class Pipeline
                 if (!File.Exists(art)) throw new StepFailed($"{id}: missing DR2 loading art {art}");
                 menu.AddRange(new[] { "--art", art });
             }
+            if (s.Reverse is { } rev) menu.AddRange(new[] { "--reverse-ir", Path.Combine(_l.IrRoot, rev) });
             _c.P.Must(_additive, menu, log, $"{label}: menu images");
         }
         Files.DeleteMatching(_l.Dist, $"zz_acrxs_s_{idl}_P.*");

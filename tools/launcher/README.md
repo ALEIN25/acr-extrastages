@@ -68,6 +68,25 @@ steps run non-interactively as commands; `AcrExtraStages.exe --help` lists them.
 
 Interrupting is safe: the next run skips prepared data and unchanged containers.
 
+## UI launcher
+
+A plain double-click (or `AcrExtraStages.exe ui`) opens the launcher as a page in your browser, served by the exe on
+127.0.0.1 only (`GuiServer.cs`, page in `ui/index.html`, embedded; every API call carries a per-session token). Tick
+stages per location, then **Install selection** (builds what is missing and installs exactly the ticked stages, so
+unticking an installed stage removes it), **Update installed**, **Build only** or **Uninstall all**, with live progress
+per stage. `AcrExtraStages.exe menu` keeps the console menu; `ui --no-browser` only prints the address.
+
+Stages are prepared and built several at a time (`--jobs N`; default from cores and RAM, at most 4). Stages of one DR2
+location are prepared one after another (they share its extracted archive cache).
+
+## Offline 3D preview (no game needed)
+
+`AcrExtraStages.exe build --only <id> --preview` also writes `work\acr\preview\<id>\preview.glb` (the stage's visible
+mesh with its DR2 textures, UVs rounded to 16-bit floats like the game) and `preview.json` (camera spots). View it with
+`node tools/preview/serve.mjs` and <http://localhost:8765/?stage=<id>>: camera buttons for the start and points along
+the route, orbit / WASD fly. Game materials (ACR's road, the debug colours) show as flat stand-in colours; lighting is
+not ACR's.
+
 ## Developer smoke test (no game install)
 
 ```powershell

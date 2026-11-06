@@ -9,6 +9,8 @@ internal sealed class Proc
     readonly Layout _l;
     public Dictionary<string, string> Env { get; } = new(StringComparer.OrdinalIgnoreCase);
     public bool Verbose { get; set; }
+    /// Several stages at once: no in-place status tickers (they would overwrite each other's line).
+    public bool Quiet { get; set; }
 
     public Proc(Layout l) { _l = l; }
 
@@ -43,7 +45,7 @@ internal sealed class Proc
                 if (Verbose) Ui.Detail(s);
             }
         }
-        using var ticker = label is null ? null : new Ticker(label);
+        using var ticker = label is null || Quiet ? null : new Ticker(label);
         using var p = new Process { StartInfo = psi };
         p.OutputDataReceived += (_, e) => On(e.Data);
         p.ErrorDataReceived += (_, e) => On(e.Data);
@@ -112,17 +114,19 @@ internal static class Ui
 {
     public static readonly object Gate = new();
     public static bool Yes;     // --yes: answer every prompt with its default (non-interactive runs)
+    /// Every printed line also goes here with its kind (line, detail, ok, warn, err, head): the UI launcher's live log.
+    public static Action<string, string>? Echo;
 
-    public static void Line(string s = "") { lock (Gate) Console.WriteLine(s); }
-    public static void Detail(string s) { lock (Gate) { Console.ForegroundColor = ConsoleColor.DarkGray; Console.WriteLine("      " + s); Console.ResetColor(); } }
-    public static void Ok(string s) => Color(ConsoleColor.Green, s);
-    public static void Warn(string s) => Color(ConsoleColor.Yellow, s);
-    public static void Err(string s) => Color(ConsoleColor.Red, s);
-    public static void Head(string s) { Line(); Color(ConsoleColor.Cyan, s); }
+    public static void Line(string s = "") { lock (Gate) { Console.WriteLine(s); Echo?.Invoke("line", s); } }
+    public static void Detail(string s) { lock (Gate) { Console.ForegroundColor = ConsoleColor.DarkGray; Console.WriteLine("      " + s); Console.ResetColor(); Echo?.Invoke("detail", s); } }
+    public static void Ok(string s) => Color(ConsoleColor.Green, s, "ok");
+    public static void Warn(string s) => Color(ConsoleColor.Yellow, s, "warn");
+    public static void Err(string s) => Color(ConsoleColor.Red, s, "err");
+    public static void Head(string s) { Line(); Color(ConsoleColor.Cyan, s, "head"); }
 
-    static void Color(ConsoleColor c, string s)
+    static void Color(ConsoleColor c, string s, string kind)
     {
-        lock (Gate) { Console.ForegroundColor = c; Console.WriteLine(s); Console.ResetColor(); }
+        lock (Gate) { Console.ForegroundColor = c; Console.WriteLine(s); Console.ResetColor(); Echo?.Invoke(kind, s); }
     }
 
     public static string? Ask(string prompt, string? def = null)

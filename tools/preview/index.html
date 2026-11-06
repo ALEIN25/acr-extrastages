@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stage Preview</title>
+<style>
+  :root { --panel: rgba(20, 22, 26, 0.82); --text: #e8e8e8; --muted: #9aa0a6; --accent: #4f8cff; }
+  html, body { margin: 0; height: 100%; background: #9fc3e6; color: var(--text); font: 13px/1.4 system-ui, sans-serif; overflow: hidden; }
+  canvas { display: block; }
+  #panel { position: absolute; top: 12px; left: 12px; background: var(--panel); padding: 10px 12px; border-radius: 8px; max-width: 320px; max-height: calc(100vh - 44px); overflow-y: auto; overscroll-behavior: contain; }
+  #panel select#stage { width: 100%; overflow-y: auto; }
+  #panel select#stage option { padding: 2px 4px; }
+  #panel select#stage option:checked { background: var(--accent); color: #fff; }
+  #panel h1 { font-size: 14px; margin: 0 0 6px; }
+  #panel select, #panel button { font: inherit; margin: 2px 2px 2px 0; padding: 3px 8px; border-radius: 4px; border: 1px solid #444; background: #2a2d33; color: var(--text); cursor: pointer; }
+  #panel button.on { border-color: var(--accent); }
+  #status, #help { color: var(--muted); margin-top: 6px; }
+</style>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js", "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/" } }
+</script>
+</head>
+<body>
+<div id="panel">
+  <h1>Stage preview</h1>
+  <select id="stage"></select>
+  <div id="cams"></div>
+  <div id="status">loading…</div>
+  <div id="help">Drag to orbit, right-drag to pan, wheel to zoom. WASD / QE fly, Shift faster.</div>
+</div>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.shadowMap.enabled = false;
+document.body.appendChild(renderer.domElement);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x9fc3e6);
+scene.fog = new THREE.Fog(0x9fc3e6, 400, 3000);
+scene.add(new THREE.HemisphereLight(0xcfe3ff, 0x5a4a3a, 1.1));
+const sun = new THREE.DirectionalLight(0xfff2dd, 2.2); sun.position.set(300, 500, 200); scene.add(sun);
+const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.1, 20000);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = false;
+addEventListener('resize', () => { camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); });
+
+const keys = new Set();
+// keys typed into the stage list (arrows, type-ahead) pick stages, not fly the camera
+addEventListener('keydown', e => { if (e.target.tagName !== 'SELECT') keys.add(e.key.toLowerCase()); });
+addEventListener('keyup', e => keys.delete(e.key.toLowerCase()));
+let meta = null, model = null;
+const status = document.getElementById('status');
+
+function setCam(i) {
+  const c = meta.cameras[i];
+  camera.position.set(...c.eye); controls.target.set(...c.target); controls.update();
+  document.querySelectorAll('#cams button').forEach((b, k) => b.classList.toggle('on', k === i));
+}
+window.setCam = setCam;
+// top view over camera spot i at height h (metres); holes: magenta sky so gaps in the ground stand out
+window.topView = (i = 0, h = 250) => { const s = meta.cameras[i]; camera.position.set(s.target[0], h, s.target[2] + 0.01); controls.target.set(s.target[0], 0, s.target[2]); controls.update(); };
+window.holes = on => { const c = on ? 0xff00ff : 0x9fc3e6; scene.background.set(c); scene.fog.color.set(c); scene.fog.far = on ? 1e7 : 3000; };
+window.viewer = { THREE, scene, camera, controls, get meta() { return meta; } };
+// inspect(x, y): look at what is under screen pixel (x, y) from `dist` metres away; returns the hit mesh name and point
+window.inspect = (x, y, dist = 6) => {
+  const r = new THREE.Raycaster(); r.setFromCamera(new THREE.Vector2(x / innerWidth * 2 - 1, -(y / innerHeight) * 2 + 1), camera);
+  const hit = r.intersectObject(model, true)[0];
+  if (!hit) return 'nothing under that pixel';
+  const back = camera.position.clone().sub(hit.point).normalize().multiplyScalar(dist);
+  camera.position.copy(hit.point).add(back); controls.target.copy(hit.point); controls.update();
+  return `${hit.object.name} at ${hit.point.toArray().map(v => v.toFixed(1)).join(', ')}`;
+};
+
+async function load(id) {
+  status.textContent = `loading ${id}…`;
+  window.previewReady = false;
+  if (model) { scene.remove(model); model = null; }
+  meta = await (await fetch(`/preview/${id}/preview.json`, { cache: 'no-store' })).json();
+  const gltf = await new GLTFLoader().loadAsync(`/preview/${id}/preview.glb?${Date.now()}`);
+  model = gltf.scene;
+  model.traverse(o => { if (o.isMesh) { const m = o.material; if (m.map) { m.map.wrapS = m.map.wrapT = THREE.RepeatWrapping; m.map.anisotropy = 8; } } });
+  scene.add(model);
+  const cams = document.getElementById('cams'); cams.innerHTML = '';
+  meta.cameras.forEach((c, i) => { const b = document.createElement('button'); b.textContent = c.name; b.onclick = () => setCam(i); cams.appendChild(b); });
+  const top = document.createElement('button'); top.textContent = 'top view';
+  top.onclick = () => topView(0, 600);
+  cams.appendChild(top);
+  const hb = document.createElement('button'); hb.textContent = 'show holes'; let hon = false;
+  hb.onclick = () => { hon = !hon; holes(hon); hb.classList.toggle('on', hon); };
+  cams.appendChild(hb);
+  setCam(0);
+  status.textContent = `${id}: ${meta.triangles.toLocaleString()} triangles, ${meta.sections} sections`;
+  history.replaceState(null, '', `?stage=${id}&cam=0`);
+  requestAnimationFrame(() => requestAnimationFrame(() => { window.previewReady = true; }));
+}
+
+const sel = document.getElementById('stage');
+const ids = await (await fetch('/stages')).json();
+for (const id of ids) sel.add(new Option(id, id));
+// an in-page list instead of a dropdown popup, so every stage is reachable by scrolling the panel / list
+sel.size = Math.max(2, Math.min(ids.length, 10));
+sel.onchange = () => load(sel.value);
+const want = new URLSearchParams(location.search).get('stage');
+if (ids.length === 0) status.textContent = 'no previews yet: build with AcrExtraStages.exe install --preview';
+else { sel.value = ids.includes(want) ? want : ids[0]; await load(sel.value); const c = Number(new URLSearchParams(location.search).get('cam') ?? 0); if (c) setCam(c); }
+
+const clock = new THREE.Clock();
+renderer.setAnimationLoop(() => {
+  const dt = clock.getDelta();
+  const speed = (keys.has('shift') ? 120 : 25) * dt;
+  const fwd = new THREE.Vector3(); camera.getWorldDirection(fwd);
+  const right = new THREE.Vector3().crossVectors(fwd, camera.up).normalize();
+  const move = new THREE.Vector3();
+  if (keys.has('w')) move.add(fwd); if (keys.has('s')) move.sub(fwd);
+  if (keys.has('d')) move.add(right); if (keys.has('a')) move.sub(right);
+  if (keys.has('e')) move.y += 1; if (keys.has('q')) move.y -= 1;
+  if (move.lengthSq() > 0) { move.normalize().multiplyScalar(speed); camera.position.add(move); controls.target.add(move); }
+  controls.update();
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>
