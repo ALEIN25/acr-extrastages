@@ -12,6 +12,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Every DiRT Rally 2.0 stage that fits (106 of 156, start to finish at most 9 km) can be built.
   The launcher still starts with the recommended 30. In Choose stages, `all` selects every stage
   that fits and `default` restores the 30. The 50 longer stages are listed and cannot be built.
+- Reverse variants: a route and its reverse build into one stage, with its own menu map and
+  elevation profile (`config/variants.toml`).
+- Real DiRT Rally 2.0 rocks near the road, and real tree models for the nearest trees.
+- A build check that fails a stage if something solid near the road cannot be seen. Colliders
+  with nothing drawn on them are now drawn.
 
 ### Changed
 
@@ -27,6 +32,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The car no longer starts among the parked start-area vehicles: it waits 12 m before the start
+  line, on every stage.
+- Tree trunks no longer stand 20 m tall in white birch bark, and buildings no longer pick up each
+  other's textures when two models share a material name.
 - Finland: the middle of some stages (Naarajärvi) had no detailed ground or road, so the far-off
   low-detail ground showed through with smeared textures and grass on the road. Those parts of
   the terrain are stored as `HIGH_` tiles, which are now read as well.

@@ -3,9 +3,8 @@
 **Goal:** the DR2 routes that share a road become one ACR track with several variants (Forward, Reverse, later the
 half-length sections), built into **one** stage container instead of one container per route.
 
-**Status (2026-11-01):** phase 1 (pairs) implemented; for the in-game test `config/variants.toml` has `enabled = true` with
-`only = "argentina_rally_01_route_3"` (only that pair; every other stage keeps its own container). Shipped default: off;
-verified offline only, the in-game checkpoint (4, after step 5) is pending. What is where:
+**Status (2026-11-06):** phase 1 (pairs) implemented and on for every pair in `config/variants.toml`. Argentina 01 r3 + r4 was
+checked in game (each variant starts from its own end); the other pairs are verified offline only. What is where:
 
 - `dr2-extract stage-ir --also <route>`: ground (each route's own track.jpk outside the corridors before it), objects,
   render meshes and the ground bake cover the other route too; `stage.json` lists them in `corridor_also`.

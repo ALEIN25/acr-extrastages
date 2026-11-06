@@ -54,6 +54,14 @@ LODs, e.g. SpruceWales06 4867 / 4875 / 8 / 10 triangles, so far trees drop to sm
 Cross-package imports work (LegacyPackage.AddImport, as the material imports in Visuals.cs). Set BodyInstance to NoCollision,
 as the game does on 434 HISM and 177 Replaceable components; car physics is the BakedData we write.
 
+## Decision: DR2's trees, not ACR's
+
+The goal is DR2's own look, so the species table above is only a fallback. ACR tree meshes are classic LOD meshes (sections,
+position, vertex, colour and index buffers; SM_SpruceWales06 LOD0 has 2+ sections, 5487 vertices, 4 UV channels), so a
+stage-owned StaticMesh package can be cloned from one and filled with DR2's geometry, as UiTexture.Write does for textures.
+LOD0 is the DR2 mesh; the far LOD is DR2's own billboard. DR2's materials stay as the MICs the build already writes. The same
+writer can later carry rocks, bushes and grass. Open points: CardRepresentationData, BodySetup, the number of LODs.
+
 ## The gap and the plan
 
 LegacyPackage has no way to add an export. Add one (96-byte export entry, preload dependencies, ExportCount, the owning

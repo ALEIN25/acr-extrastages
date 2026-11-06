@@ -489,3 +489,23 @@ First stage: `new_zealand_rally_01_route_5` → `zz_acrxs_nz01r5_P`. Built by `a
   - Not used yet: DR2's `trees.bin`, `ornaments.bin`, `grass.grs` (vegetation) and `crowd_standing2.bin`
     (spectators, marshals, photographers: crowds_references.xml lists 31 kinds) are undecoded binary instance lists.
     ACR has the crowd side (`BC_CrowdSystemSpawnerBakedActor`, `BC_Marshal`, Characters/Crowd*, /Marshal).
+- **v1.13: start spot, DR2 rocks, near trees, every collider drawn [V offline: Argentina 01 r3, Finland 01 r2, Australia 01 r3, New Zealand 01 r5 scratch builds and previews; in game pending]:**
+  - Decoded since v1.12 (the formats are no longer unknown): `ornaments.bin`, `trees.bin`, `grass.grs` (scattering surfaces, not
+    instances) and `crowd_standing2.bin`. Only ornaments are used so far; the crowd heading convention is not settled.
+  - Start: the car waits 12 m before the line, not Hafren's 127 m. DR2's run-up is often shorter and holds the parked start-area
+    vehicles, so the host offset clamped every car to s = 5 m. Where DR2 starts the clock at its first gate (Finland 01 r2), the line
+    moves on to s = 20 m; the pacenotes count from the moved line.
+  - In game, the +10 s on the screenshots was a jumped start, not a build fault: no run-up was added to the splines.
+  - Colliders still undrawn after the physics fill are drawn as their own hull (`proxy:` sections, in the same closing loop), with
+    flat lids over cells the hull's upper faces leave flagged. `proxy:` sections are exempt from the road-corridor limit, as copies of
+    kept colliders. InvisibleCheck itself had the capsule axis wrong (local Z, the writer uses local Y).
+  - Trunk prisms stop at `trunk_draw_height_m` (3.5) with per-species bark. `dr2:` sections are keyed by template for material names
+    shared between templates (`water_runoff` gave the yellow house grey wood).
+  - Rocks: the physics fill was drawing DR2's invisible rock shells (86% of RBK+ within 30 m lies inside a rock's footprint).
+    `render/ornaments.glb` is drawn within `[ornaments] max_distance_m`, decimated to `decimate_ratio`, before the fill; rocks reaching
+    the road lose only the triangles over the limit. Argentina 01 r3: 971 rocks, fill 136,800 -> 17,297 triangles, 2.09M in total.
+    The faceted bank left beside the road is DR2's own render terrain, not the fill.
+  - Trees: `[vegetation]` draws the nearest trees as real LOD0 meshes up to `near_max_triangles` (about 50 per stage), cards beyond.
+    DR2's tree capsules already match the real trunks (about 1 m across at the base), so shrinking them changed little. Merged meshes
+    cannot carry the 630-3,150 trees within 10 m of a stage: docs/instancing-plan.md.
+  - A pair stores the visuals twice (22VG and 7FF9, 215 MB each on Argentina 01 r3). Not fixed.
