@@ -212,6 +212,32 @@ internal static class ObjectColliders
         return (a, Norm(b));
     }
 
+    /// Radius (template-local DR2 metres) of each template's real trunk near its base: the farthest trunk-material (foliage_trunk
+    /// shader) vertex from the centre of the slab between trunk_slab_m[0] and [1] above the lowest trunk vertex (else the lowest
+    /// 3 m). Templates without trunk material are absent.
+    internal static Dictionary<string, double> TrunkRadii(string objectsGlb, Toml cfg)
+    {
+        var res = new Dictionary<string, double>();
+        var matsPath = Path.Combine(Path.GetDirectoryName(objectsGlb)!, "objects.materials.json");
+        if (!File.Exists(matsPath)) return res;
+        var trunkMats = JsonNode.Parse(File.ReadAllText(matsPath))!.AsArray()
+            .Where(m => (m!["shader_group"]?.GetValue<string>() ?? "").Contains("foliage_trunk", StringComparison.OrdinalIgnoreCase))
+            .Select(m => m!["name"]!.GetValue<string>()).ToHashSet();
+        var slab = cfg.Arr("shapes", "trunk_slab_m").Select(x => Convert.ToDouble(x)).ToArray();
+        foreach (var g in new Glb(objectsGlb).Primitives().Where(p => trunkMats.Contains(p.Material)).GroupBy(p => p.Mesh))
+        {
+            var v = g.SelectMany(p => Enumerable.Range(0, p.Positions.Length / 3).Select(i => new Vector3(p.Positions[i * 3], p.Positions[i * 3 + 1], p.Positions[i * 3 + 2]))).ToList();
+            if (v.Count == 0) continue;
+            float y0 = v.Min(q => q.Y);
+            var ring = v.Where(q => q.Y >= y0 + slab[0] && q.Y <= y0 + slab[1]).ToList();
+            if (ring.Count < 3) ring = v.Where(q => q.Y <= y0 + 3).ToList();
+            if (ring.Count < 3) continue;
+            float cx = (ring.Min(q => q.X) + ring.Max(q => q.X)) / 2, cz = (ring.Min(q => q.Z) + ring.Max(q => q.Z)) / 2;
+            res[g.Key] = ring.Max(q => Math.Sqrt((q.X - cx) * (q.X - cx) + (q.Z - cz) * (q.Z - cz)));
+        }
+        return res;
+    }
+
     // ---- build ----
 
     public static Result Build(string stageJson, StageBuild.Placement pl, Toml cfg, RoadCorridor road,
@@ -240,6 +266,29 @@ internal static class ObjectColliders
             (JsonNode?)string.Join(", ", offs.Select((o, k) => $"{o:0} m: {kv.Value[k]}")))));
         var j = JsonNode.Parse(File.ReadAllText(stageJson))!["objects"]!;
         var templates = j["templates"]!.AsObject();
+        // template-local bounds of each render mesh (render/objects.glb, one mesh per template): an unrotated box collider is
+        // clipped to them (+ box_mesh_margin_m), so no box stands where nothing of its object is drawn (v1.12: Argentina 01
+        // r3's vehicle boxes reached past their meshes over open ground; InvisibleCheck)
+        var meshBounds = new Dictionary<string, (Vector3 min, Vector3 max)>();
+        var objGlb = Path.Combine(Path.GetDirectoryName(stageJson)!, "render", "objects.glb");
+        double clipMargin = cfg["shapes"].TryGetValue("box_mesh_margin_m", out var bmm) && bmm is double bmd ? bmd : -1;
+        if (clipMargin >= 0 && File.Exists(objGlb))
+            foreach (var prim in new Glb(objGlb).Primitives())
+            {
+                var (mn, mx) = meshBounds.TryGetValue(prim.Mesh, out var known) ? known : (new Vector3(float.MaxValue), new Vector3(float.MinValue));
+                for (int v = 0; v + 2 < prim.Positions.Length; v += 3)
+                {
+                    var q = new Vector3(prim.Positions[v], prim.Positions[v + 1], prim.Positions[v + 2]);
+                    mn = Vector3.Min(mn, q); mx = Vector3.Max(mx, q);
+                }
+                meshBounds[prim.Mesh] = (mn, mx);
+            }
+        int boxesClipped = 0;
+        // round 3: a tree's collider capsule is much fatter than its real trunk (0.5-1.3 m across against a ~0.3 m trunk): never
+        // wider than the template's trunk mesh near its base (+ margin); length and axis stay
+        var trunkRadius = cfg["shapes"].ContainsKey("trunk_slab_m") && File.Exists(objGlb) ? TrunkRadii(objGlb, cfg) : new Dictionary<string, double>();
+        double trunkMargin = cfg["shapes"].TryGetValue("trunk_collider_margin_m", out var tcm) && tcm is double tcd ? tcd : 0;
+        var trunkShrunk = new SortedDictionary<string, (double before, double after, int n)>();
         var skipClasses = cfg.Arr("skip", "shape_classes").Cast<string>().ToHashSet();
         var skipBreaks = cfg.Arr("skip", "breaks_on_impulse").Cast<string>().ToHashSet();
         var probe = res.Probe = new RoadProbe(road, surfaces, cfg, res.RoadCodes = RoadSurfaces.For(cfg.Arr("road", "surfaces"), surfaces, centreUe));
@@ -273,9 +322,25 @@ internal static class ObjectColliders
                     if (brk is not null && skipBreaks.Contains(brk)) { Skip($"breaks on {brk}"); continue; }
                     if (body["static"]?.GetValue<bool>() == false) { Skip("not static"); continue; }
 
-                    var m = Trs(sh["transform"]) * mi;
+                    var shT = Trs(sh["transform"]);
                     var dims = sh["dimensions"]!;
-                    double D(string k) => dims[k]!.GetValue<double>();
+                    var clipped = new Dictionary<string, double>();
+                    double D(string k) => clipped.TryGetValue(k, out var cv) ? cv : dims[k]!.GetValue<double>();
+                    if (kind == "box" && meshBounds.TryGetValue(tname, out var mb) && sh["transform"]?["rotation"] is JsonArray rq
+                        && Math.Abs(Math.Abs(rq[3]!.GetValue<double>()) - 1) < 1e-4 && sh["transform"]?["matrix"] is null && sh["transform"]?["scale"] is null)
+                    {
+                        var pos = sh["transform"]!["position"] is JsonArray pa ? new Vector3(pa[0]!.GetValue<float>(), pa[1]!.GetValue<float>(), pa[2]!.GetValue<float>()) : Vector3.Zero;
+                        var half = new Vector3((float)D("width"), (float)D("height"), (float)D("length")) / 2;
+                        var margin = new Vector3((float)clipMargin);
+                        var lo = Vector3.Max(pos - half, mb.min - margin); var hi = Vector3.Min(pos + half, mb.max + margin);
+                        if (lo.X < hi.X && lo.Y < hi.Y && lo.Z < hi.Z && (lo != pos - half || hi != pos + half))
+                        {
+                            clipped["width"] = hi.X - lo.X; clipped["height"] = hi.Y - lo.Y; clipped["length"] = hi.Z - lo.Z;
+                            shT = Matrix4x4.CreateTranslation((lo + hi) / 2);
+                            boxesClipped++;
+                        }
+                    }
+                    var m = shT * mi;
                     var o = Vector3.Transform(Vector3.Zero, m);
                     var ex = Vector3.TransformNormal(Vector3.UnitX, m);
                     var ey = Vector3.TransformNormal(Vector3.UnitY, m);
@@ -302,6 +367,13 @@ internal static class ObjectColliders
                         {
                             double r = kind == "sphere" ? D("radius") * (ex.Length() + ey.Length() + ez.Length()) / 3 : D("radius") * (ex.Length() + ez.Length()) / 2;
                             double h = kind == "sphere" ? 2 * r : D("height") * ey.Length();
+                            if (kind == "cylinder" && wall == "PM_WallWoodTreeTrunks" && trunkRadius.TryGetValue(tname, out var tr)
+                                && (tr + trunkMargin) * (ex.Length() + ez.Length()) / 2 is var rt && rt < r)
+                            {
+                                var was = trunkShrunk.GetValueOrDefault(tname);
+                                trunkShrunk[tname] = (Math.Max(was.before, r * 100), Math.Max(was.after, rt * 100), was.n + 1);
+                                r = rt;
+                            }
                             var (cy, cx) = Ortho(kind == "sphere" ? new V3(0, 0, 1) : uy, kind == "sphere" ? new V3(1, 0, 0) : ux);
                             var cz = Cross(cx, cy);
                             if (h >= 2 * r)
@@ -383,6 +455,9 @@ internal static class ObjectColliders
         rep["kept_max_edge_overlap_m"] = Math.Round(worstKeptPen / 100, 3);
         rep["kept"] = new JsonObject(keptPer.Select(kv => KeyValuePair.Create(kv.Key, (JsonNode?)kv.Value)));
         rep["kept_total"] = res.Kept.Count;
+        rep["boxes_clipped_to_mesh"] = boxesClipped;
+        rep["tree_collider_radius_cm"] = new JsonObject(trunkShrunk.Select(kv => KeyValuePair.Create(kv.Key,
+            (JsonNode?)$"{kv.Value.before:0} -> {kv.Value.after:0} ({kv.Value.n} capsules)")));
         return res;
     }
 

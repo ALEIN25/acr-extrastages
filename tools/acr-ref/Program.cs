@@ -90,6 +90,8 @@ internal static class Program
 
         DR2 stage port (host: Hafren South forward; see docs/decisions.md D6, mods/stage/build.ps1):
           acr-ref stage-build    --ir <work/ir/stage> --legacy <retoc legacy root> --out <mod root> [--report f.json] [--keep-pacenotes 1]
+                                 [--reverse-ir <work/ir/reverse stage> [--variants config/variants.toml]]   the reverse route as the
+                                 host's reverse variant (cell 7FF9, reverse pacenotes); --ir prepared with stage-ir --also <reverse>
           acr-ref stage-fit      [--ir-root work/ir] [--out work/acr/fit-report.json] [--margin 400] [--max-length 9000] [--filter <regex>]
                                  read-only: placement + physics world box per stage (stage-build --bounds 1), long/tall stages flagged
           acr-ref stage-check    --ir <dir> --legacy <root> --report <f.json> [--out file]   offline collision/raycast/spline checks

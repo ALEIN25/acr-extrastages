@@ -181,8 +181,9 @@ internal static class StageVerify
                     var mic = p.LoadPackage("acr/Content" + path["/Game".Length..] + ".uasset").GetExports()
                         .OfType<CUE4Parse.UE4.Assets.Exports.Material.UMaterialInstanceConstant>().Single();
                     var parent = mic.Parent?.Load<CUE4Parse.UE4.Assets.Exports.Material.UMaterialInterface>();
-                    if (parent?.Name != "M_Simple") { bad.Add($"{path}: parent {parent?.Name ?? "unresolved"}"); continue; }
-                    bool ok = mic.TextureParameterValues.Length == 3;
+                    if (parent?.Name is not ("M_Simple" or "M_MasterMaskedSurfaces")) { bad.Add($"{path}: parent {parent?.Name ?? "unresolved"}"); continue; }
+                    // 3: base colour, ORM, normal; 5: the ground bake's detail-normal template (+ detail and global normal)
+                    bool ok = mic.TextureParameterValues.Length is 3 or 5;
                     foreach (var tp in mic.TextureParameterValues)
                     {
                         var tex = tp.ParameterValue.Load<CUE4Parse.UE4.Assets.Exports.Texture.UTexture2D>();
@@ -207,7 +208,7 @@ internal static class StageVerify
                 catch (Exception e) { bad.Add($"{path}: {e.GetType().Name} {e.Message}"); }
             }
             C(micOk == paths.Count && bad.Count == 0,
-              $"DR2 materials via CUE4Parse: {micOk} of {paths.Count} MICs load with parent M_Simple and 3 textures; {texOk} distinct textures load " +
+              $"DR2 materials via CUE4Parse: {micOk} of {paths.Count} MICs load with parent M_Simple and 3 (or 5, detail normal) textures; {texOk} distinct textures load " +
               $"(NeverStream, not virtual, every mip's data present){(previews is not null ? $"; {png} base colour previews -> {previews}" : "")}" +
               (bad.Count > 0 ? $"; {string.Join("; ", bad.Take(5))}" : ""));
         }

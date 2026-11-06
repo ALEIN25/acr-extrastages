@@ -65,8 +65,10 @@ internal static class Bounds
         return -1;
     }
 
-    public static JsonObject Build(string legacy, string outRoot, StageBuild.World world, Options o)
+    /// <paramref name="reverse"/>: the reverse gameplay cell carries a DR2 route too (stage-build --reverse-ir) and gets the same treatment.
+    public static JsonObject Build(string legacy, string outRoot, StageBuild.World world, Options o, bool reverse = false)
     {
+        var gameplayCells = reverse ? new[] { GameplayCell, HostPaths.Reverse.CellName } : [GameplayCell];
         var dest = Path.Combine(outRoot, Scenery.Persistent + ".umap");
         var src = File.Exists(dest) ? dest : HostPaths.Resolve(legacy, Scenery.Persistent);
         var pkg = new LegacyPackage(src);
@@ -77,12 +79,13 @@ internal static class Bounds
         // for the whole variant; only force bIsAlwaysLoaded if a build of the game ever makes it spatial.
         for (int e = 0; e < pkg.ExportCount; e++)
         {
-            if (pkg.ExportClass(e) != Scenery.CellExportClass || pkg.ExportName(e) != GameplayCell) continue;
+            if (pkg.ExportClass(e) != Scenery.CellExportClass || !gameplayCells.Contains(pkg.ExportName(e))) continue;
             var d = pkg.GetExportData(e);
             var (always, desc) = Scenery.CellState(pkg, d);
             bool spatial = Scenery.SpatiallyLoaded(d);
-            r["gameplay_cell"] = $"{desc}; alwaysLoaded {always}, spatiallyLoaded {spatial}";
-            if (spatial && !always) { pkg.SetExportData(e, Scenery.WithAlwaysLoaded(d)); r["gameplay_cell_forced_always_loaded"] = true; }
+            var key = pkg.ExportName(e) == GameplayCell ? "gameplay_cell" : "reverse_gameplay_cell";
+            r[key] = $"{desc}; alwaysLoaded {always}, spatiallyLoaded {spatial}";
+            if (spatial && !always) { pkg.SetExportData(e, Scenery.WithAlwaysLoaded(d)); r[key + "_forced_always_loaded"] = true; }
         }
 
         if (!world.IsHost)

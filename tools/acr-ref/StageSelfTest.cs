@@ -114,7 +114,22 @@ internal static class HostPaths
     public const string Cell = @"acr\Content\Levels\WalesS4HafrenSouth\_Generated_\22VG0QIP9ATUQI633K86KWPFP";
     public const string Variants = @"acr\Content\Data\Database\Main\TrackSelection\DT_TracksVariants";
     public const string Pacenote = @"acr\Content\Data\Pacenote\Tables\DT_PacenoteHafrenSouthForward";
+    // the reverse variant's gameplay cell and pacenote table (stage-build --reverse-ir: a DR2 route and its reverse in one level)
+    public const string ReverseCell = @"acr\Content\Levels\WalesS4HafrenSouth\_Generated_\7FF9A0XR2HIRJVFZU6AEAFHMU";
+    public const string ReversePacenote = @"acr\Content\Data\Pacenote\Tables\DT_PacenoteHafrenSouthReverse";
     public static readonly string[] All = [Baked, Cell, Variants, Pacenote];
+
+    /// One direction of the host track: its gameplay cell and pacenote table (legacy-root relative, no extension).
+    internal sealed record Direction(string Name, string Cell, string Pacenote)
+    {
+        public string CellName => Path.GetFileName(Cell);
+        /// The cell as a CUE4Parse game path.
+        public string CellGamePath => Cell.Replace('\\', '/') + ".umap";
+        public string PacenoteGamePath => Pacenote.Replace('\\', '/') + ".uasset";
+    }
+
+    public static readonly Direction Forward = new("forward", Cell, Pacenote);
+    public static readonly Direction Reverse = new("reverse", ReverseCell, ReversePacenote);
 
     /// The .uasset or .umap header path under a retoc legacy root.
     public static string Resolve(string root, string rel)

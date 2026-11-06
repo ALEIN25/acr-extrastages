@@ -174,6 +174,30 @@ internal static class Scenery
 
     // ---------------- build ----------------
 
+    /// GameConfigurator.Configurations[FullReverse].DataLayersToLoad: the entry naming <paramref name="from"/> (a soft path to
+    /// /Game/.../DataLayers/<from>.<from>, inline FName pair) is pointed at <paramref name="to"/>, a same-size edit of two name
+    /// indices. Both names must already be in the name map (the forward and reverse entries reference all four layers).
+    static JsonObject ReverseConfigurator(LegacyPackage pkg, string from, string to)
+    {
+        int e = Enumerable.Range(0, pkg.ExportCount).Single(i => pkg.ExportClass(i) == "GameConfigurator");
+        int Name(string s) => pkg.FindName(s) is var i and >= 0 ? i : throw new InvalidDataException($"name {s} not in the persistent level");
+        string PathOf(string layer) => pkg.Names.Single(n => n.EndsWith("/DataLayers/" + layer, StringComparison.Ordinal));
+        byte[] Pair(string layer)
+        {
+            var b = new byte[16];
+            BinaryPrimitives.WriteInt32LittleEndian(b, Name(PathOf(layer)));
+            BinaryPrimitives.WriteInt32LittleEndian(b.AsSpan(8), Name(layer));
+            return b;
+        }
+        var d = pkg.GetExportData(e);
+        var pat = Pair(from);
+        int at = d.AsSpan().IndexOf(pat);
+        if (at < 0 || d.AsSpan(at + 1).IndexOf(pat) >= 0) throw new InvalidDataException($"GameConfigurator: {from} not found exactly once");
+        Pair(to).CopyTo(d, at);
+        pkg.SetExportData(e, d);
+        return new JsonObject { ["game_configurator"] = $"FullReverse DataLayersToLoad: {from} -> {to}" };
+    }
+
     internal sealed record Plan(HashSet<string> KeepCells, string[] ReverseLayers, string HiddenLayer, HashSet<string> HideClasses, Regex[] HideMeshes);
 
     static Plan LoadPlan(Toml cfg) => new(
@@ -183,7 +207,11 @@ internal static class Scenery
         cfg.Arr("persistent", "hide_actor_classes").Cast<string>().ToHashSet(),
         cfg.Arr("persistent", "hide_meshes").Cast<string>().Select(x => new Regex(x)).ToArray());
 
-    public static JsonObject Build(string legacy, string outRoot, Toml cfg, string usmap, bool actorHidden = false)
+    /// <paramref name="reverse"/> (config/variants.toml [reverse]; stage-build --reverse-ir): the reverse variant carries a DR2 route too. Its gameplay cell is kept
+    /// with only the reverse gameplay layer, every other cell goes to hidden_layer alone (also the ones with reverse gameplay
+    /// layers: Hafren's reverse crowds, marshals and props), and the GameConfigurator's reverse entry loads the reverse gameplay
+    /// layer in place of hidden_layer's, so neither variant streams Hafren's scenery.
+    public static JsonObject Build(string legacy, string outRoot, Toml cfg, string usmap, bool actorHidden = false, Toml? reverse = null)
     {
         var path = HostPaths.Resolve(legacy, Persistent);
         var raw = (File.ReadAllBytes(path), File.ReadAllBytes(Path.ChangeExtension(path, ".uexp")));
@@ -193,6 +221,13 @@ internal static class Scenery
             throw new InvalidDataException("persistent level does not round-trip byte-exactly through LegacyPackage");
         var plan = LoadPlan(cfg);
         var report = new JsonObject { ["round_trip"] = "byte-exact" };
+        string? reverseCell = null, reverseLayer = null;
+        if (reverse is not null)
+        {
+            reverseCell = HostPaths.Reverse.CellName;
+            reverseLayer = reverse.Str("reverse", "gameplay_layer");
+            report["reverse"] = ReverseConfigurator(pkg, reverse.Str("reverse", "configurator_from"), reverse.Str("reverse", "configurator_to"));
+        }
 
         // cells
         var moves = new SortedDictionary<string, int>();
@@ -206,8 +241,19 @@ internal static class Scenery
             var name = pkg.ExportName(e);
             var now = Layers(pkg, d, c);
             if (plan.KeepCells.Contains(name)) { kept++; continue; }
-            var rev = now.Where(plan.ReverseLayers.Contains).ToList();
-            var next = rev.Count > 0 ? rev : [plan.HiddenLayer];
+            List<string> next;
+            if (name == reverseCell)
+            {
+                if (!now.Contains(reverseLayer!)) throw new InvalidDataException($"reverse gameplay cell {name} has layers {string.Join("+", now)}, not {reverseLayer}");
+                next = [reverseLayer!];
+                kept++;
+            }
+            else if (reverse is not null) next = [plan.HiddenLayer];
+            else
+            {
+                var rev = now.Where(plan.ReverseLayers.Contains).ToList();
+                next = rev.Count > 0 ? rev : [plan.HiddenLayer];
+            }
             if (next.SequenceEqual(now)) { unchanged++; continue; }
             pkg.SetExportData(e, WithLayers(pkg, d, c, next));
             retagged++;
