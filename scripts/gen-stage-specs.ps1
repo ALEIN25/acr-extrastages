@@ -110,6 +110,9 @@ foreach ($st in $data.Stages) {
     }
     # Optional per-stage placement tweak (metres added to the computed height); omitted when unset
     if ($null -ne $st.ground_offset) { $spec.GroundOffset = [double]$st.ground_offset }
+    # Optional road material: "acr" keeps ACR's own Hafren gravel road material instead of the DR2 road texture
+    $road = if ($st.road) { $st.road } else { $loc.road }
+    if ($road) { if ($road -notin 'acr', 'dr2') { throw "$acrId`: road must be acr or dr2, not $road" }; $spec.Road = $road }
     # Optional generated menu images (route map, track map, elevation profile; docs/menu-images.md); omitted when unset
     if ($st.menu_images) {
         $spec.Menu = [ordered]@{ Images = $true }

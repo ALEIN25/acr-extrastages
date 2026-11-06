@@ -119,6 +119,8 @@ $host_ = @{
     tex_srgb   = 'acr\Content\Materials\PhotoMode\Textures\T_Dirt'                # v1.8: texture templates (not shipped)
     tex_linear = 'acr\Content\Effects\Vehicles\Skid\T_SkidDebug_N'
     mic_tpl    = 'acr\Content\Environments\MonteCarloS2Sisteron\TileableMaterials\MI_SisteronConcrete01'
+    mic_detail = 'acr\Content\Props\MonteCarloProps\MOnBolStoneWallB\MI_MonBolStoneWallC'   # ground bake: M_Simple + detail normal
+    mic_masked = 'acr\Content\Props\AlsaceBuildings\FraChaBldWarehouseA\MI_FraChaBldWarehouseAProps04_OP'   # masked cut-out textures
 }
 # retoc filters on the file name; the persistent level's bare name would also match all of its cells
 $filter = @{ persistent = 'WalesS4HafrenSouth.umap' }

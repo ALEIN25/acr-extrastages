@@ -13,6 +13,24 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   The launcher still starts with the recommended 30. In Choose stages, `all` selects every stage
   that fits and `default` restores the 30. The 50 longer stages are listed and cannot be built.
 
+### Changed
+
+- Better-looking objects: tree trunks, collider-shaped objects (rocks, fences, barriers) and the
+  road-edge posts now use textures from the stage's own DiRT Rally 2.0 files (bark, rock, wood,
+  ...) instead of flat debug colours, and trees get small textured crowns. Objects with no
+  matching texture keep their old colour. Configured in `config/visuals.toml` `[object_textures]`.
+- Medium and hard DiRT Rally 2.0 bushes no longer have colliders: in ACR they stopped the car like
+  rocks, which made the verges unforgiving (about 490 per Finland stage, up to 3,600 on Greece).
+  They are still drawn.
+- UI launcher: a stage map (the route with start, splits and finish, and an elevation profile)
+  for the stage you point at.
+
+### Fixed
+
+- Finland: the middle of some stages (Naarajärvi) had no detailed ground or road, so the far-off
+  low-detail ground showed through with smeared textures and grass on the road. Those parts of
+  the terrain are stored as `HIGH_` tiles, which are now read as well.
+
 ## [0.1.0-beta.1] - Unreleased
 
 First public beta (not yet published). Brings stages from *DiRT Rally 2.0* into *Assetto Corsa

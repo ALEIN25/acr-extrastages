@@ -22,13 +22,23 @@ gates = "/Game/Data/Gameplay/PhysicalMaterials/MI_SurfaceGrass"
 [objects]
 # only used when stage-build also gets --objects (v1.3): the solid DR2 objects (the colliders written to BakedData)
 enabled = 1
-max_mesh_triangles = 4000       # per instance; heavier render meshes (vehicles, scaffolding banners, the start gantry)
-                                # are drawn as their collider shapes instead
+max_mesh_triangles = 20000      # per instance (v1.12: was 4000, which drew parked cars, campers and vans as boxes); heavier render meshes
+                                # (the start gantry, scaffolding banners) are drawn as their collider shapes instead
 prism_sides = 6                 # capsule colliders (tree trunks) drawn as n-sided prisms
 max_total_triangles = 3000000   # offline check budget for the whole visuals mesh
 tree_shape_classes = ["sSolidTreeLeafy", "sSolidPalmShortTree"]
+trunk_draw_height_m = 3.5        # round 1: near-vertical tree trunk prisms (and proxy:trunks hulls) are drawn up to this far above the tree base only
+                                #   (the 20-26 m collider columns stood up out of the crowns); the colliders stay whole. 0 = whole
 # v1.4: nothing non-solid is drawn (v1.3 drew ~8,800 bush/fern/flax/grass clumps as 9-17 m octahedra). The only
-# non-solid geometry left is the optional tree crowns (stage-build --visuals-vegetation crowns / build.ps1 -Vegetation).
+# non-solid geometry left is the optional tree crowns (stage-build --visuals-vegetation crowns / build.ps1 -Vegetation; the
+# additive build and the launcher draw them, textured per [object_textures] soft).
+# v1.9: DR2 objects without a collider of their own are drawn from their render mesh after all (armco, walls, rock banks,
+# fences, signs, houses): DR2 often puts their collision into the ground mesh (track.jpk, e.g. RBK+ rock banks), so left
+# out they were solid but invisible beside the road (Argentina 01 r3 in game: arg_ral_wal_*, 2026-11-01). Template
+# names matching not_solid_skip (case-insensitive regex: plants, light breakables, cloth) stay undrawn; plants with a
+# billboard get their cards as before. Flags, blades, banners and cloth stay out: their alpha-cut shapes would draw as boards.
+not_solid_skip = "grass|fern|flax|bush|shrub|plant|flower|weed|reed|ivy|moss|leaf|leaves|tree|palm|spectator|flag|blade|banner|bunting|cloth|tape|decal"
+not_solid_max_triangles = 20000  # per instance for those (marshal cars, recovery vans, the ambulance: 5-15k triangles)
 road_overlap_tolerance_m = 0.2  # a solid render mesh may reach max_penetration_m + this into the road corridor
                                 # (over road surface, from car_height_min_m up to overhang_height_m); deeper -> shapes
 overhang_height_m = 6
@@ -40,6 +50,9 @@ crown_bottom_fraction = 0.6     #   crown spans this fraction of the tree height
 crown_min_bottom_m = 3          #   crowns lower than this above the tree base are not drawn
 crown_road_margin_m = 1.5       #   plan clearance kept from the road edges; a crown is shrunk to fit or dropped
 crown_min_radius_m = 0.6
+cards_parallel_margin_m = 0.3   # a plant too close for crossed cards gets one card along the road, ends this far off it
+cards_max_radius_m = 12        # cards mode (trees, bushes as DR2 billboard cards, square like the billboard's views):
+                                #   half-width = min(this, half the plant's height), road margin and minimum as for crowns
 # DR2 tree canopies are inverted cone colliders (wide end up, ~3 m radius, apex ~1.5 m above the ground); drawn whole
 # they are the large orange panels seen in v1.4. The colliders are kept as DR2 has them either way.
 canopies = "clip"               # clip: draw only the part below canopy_clip_height_m above the tree base | full | none
@@ -49,6 +62,17 @@ canopy_clip_height_m = 2.5      #   car height band
 canopy_max_span_m = 1.5
 shape_min_fill = 0.8            # offline check: drawn shape bounds / collider bounds per axis (prisms and capsule tips
                                 #   are inscribed; short tilted capsules fill ~0.84)
+
+[vegetation]
+# round 3: trees whose origin is within near_m of the centreline are drawn with their real LOD0 mesh (foliage_trunk opaque, foliage
+# cut-out two-sided with its normal map) instead of cards + trunk stub, nearest first until near_max_triangles are used (budget);
+# farther trees keep the cards and a thin species-bark stub
+near_m = 10
+near_max_triangles = 90000
+# triangles of a near tree reaching into the road corridor (any surface) beyond the objects' limits are left out first: of the budget about
+# three quarters is drawn (Fi: 48 trees, 65k triangles of 90k)
+card_brightness = 1.15          # far-tree cards: DR2's billboard strips read dark next to the real foliage; colour factor (1 = as DR2)
+card_dilate_px = 12             #   colour of the opaque texels is spread this far into the transparent ones (no dark fringes)
 
 [object_materials]
 # flat colours (SurfaceColor of each MI): trunks orange, wood yellow, metal violet (posts stay magenta), concrete blue,
@@ -62,11 +86,41 @@ plastic = "/Game/Data/Gameplay/PhysicalMaterials/MI_WallPlastic"
 other = "/Game/Data/Gameplay/PhysicalMaterials/MI_WallBasic"
 soft = "/Game/Data/Gameplay/PhysicalMaterials/MI_WallBush"
 
+[object_textures]
+# only with --visuals-dr2 (objects not reverted): the class sections above (trunks, collider-shape proxies, crowns) and the
+# edge posts get a texture of the stage itself instead of the flat colour. Per class: the object diffuse (any shader) most used
+# by objects.materials.json whose DDS name contains one of the keywords, else the first stage "_d" texture with one; a class
+# with no match keeps its flat colour (the report's dr2.class_textures lists the picks). Transparent texels (foliage cards)
+# are set to the mean opaque colour, since M_Simple is opaque. UVs are box-projected, one repeat every repeat_m.
+# DR2 tree textures end in _tr_d (trunk) and _fo_d (foliage), e.g. fin_birch_full_01_a_tr_d, fin_dougfir_full_01_b_fo_d
+trunks = ["_tr_d", "bark", "trunk"]
+wood = ["wood", "plank", "timber"]
+metal = ["metal", "armco", "steel"]
+concrete = ["concrete"]
+rock = ["rock", "cliff", "boulder", "stone"]
+plastic = ["plastic", "barrel"]
+other = []
+soft = ["_fo_d", "leaf", "leaves", "foliage", "canopy", "needle", "branch"]
+posts = ["wood", "trunks", "concrete", "metal", "rock"]   # edge posts: the first class with a stage texture, else the road
+                                                          #   texture ([] keeps [materials] posts); per-face 0..1 UVs
+repeat_m = 2
+fallback = ["concrete", "rock", "wood", "metal", "trunks"]   # a class without a stage texture takes the first of these that
+                                                              #   has one, else the road texture (no debug colours)
+# [across, up] for one class: DR2 bark is a tall strip (e.g. 512 x 2048) that wraps once around a ~30-40 cm trunk, so a
+# 2 m square repeat smeared a sliver of it across each 6-sided trunk face (in-game test, Finland)
+trunks_repeat_m = [1, 4]
+# round 1: classes with no stage texture of their own that take a flat neutral colour instead of the fallback above (the fallback
+# gave buildings and walls drawn from their colliders the mossy rock). rock stays on its rock texture.
+neutral_classes = ["other", "concrete"]
+neutral_colour = [150, 148, 142]   # concrete / plaster grey
+
 [vista]
 # only with stage-build --visuals-vista 1 (build.ps1 v1.6+): DR2's distant vista ring (render/vista.glb, the NONLOD_i_j
 # meshes, ~10 km), drawn once the Hafren scenery is hidden so the horizon is not empty
 material = ""                   # engine default, like the terrain
-exclude_cell_m = 100            # vista triangles over a grid cell touched by the drawn ground are dropped
+exclude_cell_m = 100            # collision ground only: vista triangles over a grid cell touched by the drawn ground are dropped
+sink_cm = 200                   # render ground: a vista triangle is dropped when its centroid is over drawn ground or it touches
+                                #   the road (21 points); the rest is sunk this much so it meets the drawn ground's edge (no margin)
 min_distance_m = 50             # offline check: nearest vista vertex to the DR2 centreline (plan; DR2's own ring
                                 #   comes to ~83 m on nz01r5)
 
@@ -74,7 +128,22 @@ min_distance_m = 50             # offline check: nearest vista vertex to the DR2
 # only with stage-build --visuals-ground render (build.ps1 v1.10): the terrain section is DR2's render terrain
 # (render/terrain.glb) instead of its collision ground, which covers only a ribbon along the road (acr-ref
 # terrain-compare: 43% of the ground within 60 m of the nz01r5 centreline has no collision triangle)
-road_mask_cm = 50               # render triangles with vertices, edge midpoints and centre over collision road cells are dropped
+road_mask_cm = 50               # render triangles with vertices, edge midpoints and centre over collision road cells are under the road
+road_skirt_out_cm = 40          # shoulder along the road's open edges (AddSkirt): this far out ...
+road_skirt_down_cm = 60         # ... and down, covering the cracks between the road and the ground beside it
+terrain_skirt_out_cm = 20       # the same from the ground's open edges (road cut, outer boundary): out ...
+terrain_skirt_down_cm = 150     # ... and down
+gap_fill_radius_m = 500          # last-resort ground (BuildGapFill) where nothing is drawn within this of the route ...
+gap_fill_cell_m = 8              # ... in cells this size ...
+gap_fill_sink_cm = 50            # ... sunk this much below the surrounding drawn surfaces
+# v1.12: render triangles steeper than this whose three DR2 layers are one texture-array slice (rock banks; Argentina
+# 01 r3: 12% of the ground triangles, slices 8-11) are drawn on that slice with box UVs instead of the top-down ground
+# bake, which smears a few texels down each face. 0 = off.
+steep_rock_deg = 30
+hole_fill_max_m = 60         # open edge loops in the ground mesh shorter than this (perimeter) are filled (FillHoles)
+under_road_sink_cm = 20        # ... and are kept this far below it (0 = dropped): the mask reaches up to a cell past the road
+                                #   edge, and dropped triangles left open slivers along the road (holes seen in game)
+low_fill_sink_cm = 50           # DR2 low-LOD fill (BuildLowFill) below the detail ground where they overlap
 fill_cell_cm = 100              # collision ground triangles whose centre is over no render terrain are drawn as a fill
 road_lift_cm = 2                # road section raised against z-fighting where the coplanar render terrain meets it
 hole_check_m = 60               # offline check: plan samples every 2 m within this of the centreline over drawn ground
@@ -116,6 +185,29 @@ mic_base_texture = "T_ConcreteWalkway_C"      # the template's Simple_BaseColor_
 mic_orm_texture = "T_ConcreteWalkway_L"       #   Simple_OcclRoughMet_Texture -> flat orm
 mic_normal_texture = "T_ConcreteWalkway_N"    #   Simple_Normal_Texture -> flat (BC5 128, 128)
 orm = [255, 217, 0]             # occlusion 1, roughness 0.85, metal 0 (ACR _L textures: R occlusion, G roughness, B metal)
+# ground bake tiles: the bake (base colour) plus DR2's ground normal map tiled as M_Simple's detail normal, for close-up
+# relief the 6-8 cm/px bake cannot carry. Template: an M_Simple child with base colour, normal and detail normal switched on.
+detail_mic_template = "/Game/Props/MonteCarloProps/MOnBolStoneWallB/MI_MonBolStoneWallC"
+detail_mic_base_texture = "T_MonBolStoneWallC_B"
+detail_mic_orm_texture = "T_MonBolStoneWallC_L"
+detail_mic_normal_texture = "T_MonBolStoneWallC_N"
+detail_mic_detail_texture = "T_xgixbbt_2K_N"     # Simple_Normal_Texture_Detail (and _Global)
+detail_mic_tiling = 10                            # the template's DetailNormalTiling (repeats per UV unit), replaced per tile
+detail_mic_strength = 3                           # the template's DetailNormalStrength, replaced by ground_detail_strength
+# object textures with transparent texels (wire fences, nets, cut-out signs): M_MasterMaskedSurfaces (masked, two-sided,
+# colour + opacity in one texture) instead of the opaque M_Simple, which drew the transparent parts black
+masked_mic_template = "/Game/Props/AlsaceBuildings/FraChaBldWarehouseA/MI_FraChaBldWarehouseAProps04_OP"
+masked_mic_base_texture = "T_FraChaBldWarehouseAProps04_B"     # Texture Color/Opacity
+masked_mic_orm_texture = "T_FraChaBldWarehouseAProps04_L"
+masked_mic_normal_texture = "T_FraChaBldWarehouseAProps04_N"
+object_normal_max_size = 1024                     # objects and class sections get their DR2 normal map (BC5) up to this size
+masked_min_transparent = 0.05                    # share of texels with alpha < 0.5 above which a texture is drawn masked
+ground_detail_m = 1.5                             # one detail-normal repeat every this many metres
+ground_detail_strength = 1.5
+# round 1: the road bake tiles (their own detail scale, strength and ORM; the terrain keeps ground_detail_*)
+road_detail_m = 0.75
+road_detail_strength = 2.0
+road_orm = [255, 178, 0]        # occlusion 1, roughness 0.7, metal 0
 max_size = 2048                 # mips larger than this are dropped
 # DR2's terrain colour maps (nz_01_a_0x_d, section_b) are grey-centred tints over a 17-slice detail array blended per
 # vertex; M_Simple takes one texture, so the ground uses array slices as tiling textures
@@ -135,4 +227,24 @@ object_skip_shaders = ["foliage", "decal", "blend", "glass", "water", "shadow"]
 # Offline checks tuned on New Zealand that measure how closely the drawn ground / decoration follows DR2's collision mesh. On rocky
 # stages (cliffs and rocks have collision but are drawn as objects) and where DR2's terrain has gaps they fail without a real
 # defect; a failing check matching one of these regexes prints WARN (and is listed in the batch report) instead of failing the build.
-advisory = ["^visuals road corridor: posts", "^visuals: vista section last", "^visuals: terrain box UVs", "^visuals: \d+ triangles in total", "^visuals road corridor: objects:trunks", "^visuals ground: road vertices", "^visuals ground: drawn ground vs collision ground", "^visuals ground: \d+ plan samples", "^ground raycast at \d+ gate crossings", "^added simple entries: \d+ with their centre over the road surface"]
+advisory = ["^visuals road corridor: posts", "^visuals: vista section last", "^visuals: terrain box UVs", "^visuals: \d+ triangles in total", "^visuals road corridor: objects:(trunks|bark:)", "^visuals ground: road vertices", "^visuals ground: drawn ground vs collision ground", "^visuals ground: \d+ plan samples", "^ground raycast at \d+ gate crossings", "^added simple entries: \d+ with their centre over the road surface"]
+
+[invisible]
+# acr-ref stage-build / stage-check (InvisibleCheck.cs): physics against visuals as height maps around the route. A cell
+# where a DR2 collider (ground, object mesh, box, capsule) stands more than tolerance_m above everything drawn at car
+# height (band_m above the drawn ground) is an invisible obstacle; clusters of min_area_m2+ within drive_m of the
+# centreline fail the build (2026-11-01: the car stopped at nothing on open ground beside the road, Argentina 01 r3).
+radius_m = 25
+cell_m = 0.5
+tolerance_m = 0.3
+band_m = 2.5
+drive_m = 12
+min_area_m2 = 0.5
+
+[ornaments]
+# round 2b: DR2's ornament rocks (stage.json "ornaments", stage-ir --ornament-*; render/ornaments.glb), drawn as visuals only (their
+# collision is already in DR2's ground / object colliders), before the physics fill so that only fills what the rocks do not cover
+enabled = 1
+max_distance_m = 30      # plan distance of an instance from the centreline; farther rocks are not drawn
+decimate_ratio = 0.25    # each prototype is simplified once (quadric collapse, UV seams locked) to this share of its triangles
+min_triangles = 40       # prototypes (per material) at or below this are not simplified, and never below it
