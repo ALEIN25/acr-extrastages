@@ -60,6 +60,7 @@ internal static class Program
                 "ground-lod-test" => TerrainCompare.LodTest(opts),
                 "bounds-probe" => Bounds.Probe(opts),
                 "stage-fit" => StageFit.Run(opts),
+                "instancing-verify" => InstancingVerify.Run(opts),
                 _ => Fail($"unknown command '{args[0]}'"),
             };
         }

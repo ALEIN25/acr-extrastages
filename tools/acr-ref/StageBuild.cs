@@ -190,6 +190,7 @@ internal static class StageBuild
             if (vo.Ground != "collision") report["options"]!["visuals_ground"] = vo.Ground;
             if (vo.GroundLod) report["options"]!["visuals_ground_lod"] = true;
             if (vo.GroundBake is not null) report["options"]!["visuals_ground_bake"] = vo.GroundBake;
+            if (vo.InstancingLegacy is not null) report["options"]!["instancing_legacy"] = vo.InstancingLegacy;
         }
         var road = Road(ir, pl);
 
@@ -979,6 +980,8 @@ internal static class StageBuild
                 ? NewProbe(ir, pl, objCfg) : null;
             failures += Visuals.Check(new LegacyPackage(HostPaths.Resolve(root, HostPaths.Cell)), ir, pl, Toml.Load(visualsCfg), opt, w,
                                       report["cell"]?["visuals"], probe, root, report["options"]?["package_root"]?.GetValue<string>());
+            if (report["cell"]?["visuals"]?["instancing"] is { } instReport)
+                failures += Instancing.Check(new LegacyPackage(HostPaths.Resolve(root, HostPaths.Cell)), root, ir, pl, Toml.Load(visualsCfg), instReport, InPhysicsBounds, w);
         }
 
         if (report["options"]?["scenery"]?.GetValue<string>() is { } sceneryCfg)

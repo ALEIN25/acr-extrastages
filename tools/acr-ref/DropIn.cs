@@ -25,6 +25,10 @@ internal sealed class Dr2Materials
     /// For Preview: texture package -> its first written mip (format, size, blocks); MIC package -> base colour texture package.
     public readonly Dictionary<string, (Dds.Fmt fmt, int w, int h, byte[] mip)> TexMip0 = new();
     public readonly Dictionary<string, string> MicBase = new();
+    /// The legacy template root, the mod output root and the package root of this stage's written packages (Instancing).
+    public string Legacy => _legacy;
+    public string OutRoot => _outRoot;
+    public string PackageRoot => _root;
     public int TextureCount => _textures.Count;
     public int MicCount => _mics.Count;
     string? _orm, _normal;

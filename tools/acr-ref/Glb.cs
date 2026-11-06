@@ -17,6 +17,8 @@ internal sealed class Glb
         public float[]?[] Uv { get; init; } = [];
         /// COLOR_0 (4 floats per vertex, 0..1), null if absent; filled by Primitives(withUv: true).
         public float[]? Color { get; init; }
+        /// NORMAL (3 floats per vertex), null if absent; filled by Primitives(withUv: true).
+        public float[]? Normal { get; init; }
     }
 
     public Glb(string path)
@@ -55,7 +57,8 @@ internal sealed class Glb
                     if (prim["attributes"]![$"TEXCOORD_{k}"] is { } ta) uv[k] = ReadFloats(ta.GetValue<int>(), 2);
                 float[]? col = withUv && prim["attributes"]!["COLOR_0"] is { } ca && Json["accessors"]![ca.GetValue<int>()]!["type"]!.GetValue<string>() == "VEC4"
                     ? ReadFloats(ca.GetValue<int>(), 4) : null;
-                yield return new Primitive(mesh["name"]?.GetValue<string>() ?? "", mat, pos, idx) { Uv = uv, Color = col };
+                float[]? nrm = withUv && prim["attributes"]!["NORMAL"] is { } na ? ReadFloats(na.GetValue<int>(), 3) : null;
+                yield return new Primitive(mesh["name"]?.GetValue<string>() ?? "", mat, pos, idx) { Uv = uv, Color = col, Normal = nrm };
             }
     }
 

@@ -248,3 +248,16 @@ enabled = 1
 max_distance_m = 30      # plan distance of an instance from the centreline; farther rocks are not drawn
 decimate_ratio = 0.25    # each prototype is simplified once (quadric collapse, UV seams locked) to this share of its triangles
 min_triangles = 40       # prototypes (per material) at or below this are not simplified, and never below it
+
+[instancing]
+# Offline proof of instanced DR2 trees (docs/instancing-plan.md; needs --visuals-dr2): one DR2 tree template (render/objects.glb) is written
+# as a cooked StaticMesh package and its placements near the road as a HierarchicalInstancedStaticMeshComponent (NoCollision) in the
+# gameplay cell. Only the DR2 stage named by `stage` is affected; 0 = off everywhere.
+enabled = 1
+stage = "finland_rally_01_route_2"   # the one DR2 stage it applies to
+template = "fin_dougfir_tall_02_a"   # DR2 template name in objects.glb / stage.json
+mesh_template = "/Game/Foliage/Trees/SpruceWales/SM_SpruceWales06"   # cooked ACR tree mesh cloned for it (extracted like the other legacy templates)
+near_m = 120             # instances within this distance of the route centreline
+max_instances = 300      # nearest first
+billboard = 1            # a far LOD: DR2 own billboard strip as two crossed cards (MaskedMic), when the template has one
+billboard_screen_size = 0.2   # the billboard LOD is used below this screen size

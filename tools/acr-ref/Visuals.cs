@@ -39,7 +39,7 @@ internal static class Visuals
     internal sealed record Options(string Host, bool Retarget, string? Owner, string Vegetation = "none", string? Canopies = null,
                                    bool Vista = false, bool Textured = false, bool Dr2 = false, string Dr2Revert = "",
                                    string TerrainUv = "planar", string Ground = "collision", bool GroundLod = false, string? GroundBake = null,
-                                   string? Preview = null, bool RoadBake = false)
+                                   string? Preview = null, bool RoadBake = false, string? InstancingLegacy = null)
     {
         public static Options From(IReadOnlyDictionary<string, string> named) => new(
             named.GetValueOrDefault("visuals-host", "start"),
@@ -56,7 +56,8 @@ internal static class Visuals
             named.GetValueOrDefault("visuals-ground-lod", "0") != "0",
             named.GetValueOrDefault("visuals-ground-bake") is { Length: > 0 } gb ? gb : null,
             named.GetValueOrDefault("visuals-preview") is { Length: > 0 } pv ? pv : null,
-            named.GetValueOrDefault("visuals-road-bake", "0") != "0");
+            named.GetValueOrDefault("visuals-road-bake", "0") != "0",
+            named.GetValueOrDefault("instancing-legacy") is { Length: > 0 } il ? il : null);
 
         public static readonly string[] Dr2Sections = ["terrain", "road", "vista", "objects"];
 
@@ -441,6 +442,14 @@ internal static class Visuals
                                                         opt.Vegetation == "cards" && objByName is not null ? CardTexture : null, CardFrames,
                                                         objByName is null ? null : TrunkOf, objByName is null ? null : TreeKey);
             barkOfTemplate = barkOf;
+            // [instancing] (off by default): one DR2 tree template as a StaticMesh package + a HISM of its placements (Instancing)
+            if (Instancing.Enabled(cfg, ir.Id))
+            {
+                if (objByName is null) throw new ArgumentException("[instancing] needs --visuals-dr2 with the objects section on");
+                r["instancing"] = Instancing.Build(cell, ir, pl, cfg, opt, dr2!, inPhysicsBounds,
+                    (template, mat, tris) => TreeKey(template, mat, tris) is { } k ? (k, dr2!.ObjectMic(treeDiffuse[k]!)) : null,
+                    template => CardTexture(template) is { } cardTex ? (dr2!.MaskedMic("card_" + cardTex, dr2.CardTexture(cardTex), dr2.CardNormal(cardTex)), CardFrames(cardTex)) : null);
+            }
             foreach (var (key, s) in objSecs.Where(kv => kv.Key.StartsWith(VisualObjects.CardPrefix) && kv.Value.Idx.Count > 0).OrderBy(kv => kv.Key))
             {
                 var tex = key[VisualObjects.CardPrefix.Length..];

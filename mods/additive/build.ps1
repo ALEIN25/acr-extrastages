@@ -141,8 +141,8 @@ function Build-PortedStage($s, [string]$legacy, [string]$vanillaGame, [string]$a
     # the overlay (full Hafren tree + stage-build output) is only relocate's input: drop it now, before the heavy retoc step
     if (-not $KeepTemp) { Remove-Item -Recurse -Force $overlay -ErrorAction SilentlyContinue }
 
-    # Tex/Mat already live under /Game/AcrXs/Stages/<Id>/… (not relocated); copy into the stage container.
-    foreach ($sub in @('Tex', 'Mat')) {
+    # Tex/Mat/Mesh already live under /Game/AcrXs/Stages/<Id>/… (not relocated); copy into the stage container.
+    foreach ($sub in @('Tex', 'Mat', 'Mesh')) {
         $src = Join-Path $mod ("acr\Content\AcrXs\Stages\$id\$sub")
         if (Test-Path $src) { Copy-Tree $src (Join-Path $outMod "acr\Content\AcrXs\Stages\$id\$sub") }
     }

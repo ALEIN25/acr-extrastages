@@ -392,6 +392,7 @@ internal sealed class Pipeline
             (@"acr\Content\Environments\MonteCarloS2Sisteron\TileableMaterials\MI_SisteronConcrete01", null),
             (@"acr\Content\Props\MonteCarloProps\MOnBolStoneWallB\MI_MonBolStoneWallC", null),   // M_Simple with a detail normal (ground bake)
             (@"acr\Content\Props\AlsaceBuildings\FraChaBldWarehouseA\MI_FraChaBldWarehouseAProps04_OP", null),   // masked, two-sided (cut-out textures)
+            (@"acr\Content\Foliage\Trees\SpruceWales\SM_SpruceWales06", null),   // StaticMesh template of the [instancing] proof (config/visuals.toml)
         };
         foreach (var (rel, filter) in host)
         {
@@ -459,8 +460,8 @@ internal sealed class Pipeline
         foreach (var p in s.CloneObjects) rel.AddRange(new[] { "--object", $"{p.Key}={p.Value}" });
         _c.P.Must(_additive, rel, log, $"{label}: relocate");
 
-        // Tex/Mat already live under /Game/AcrXs/Stages/<Id>/ (not relocated): copy into the stage container
-        foreach (var sub in new[] { "Tex", "Mat" })
+        // Tex/Mat/Mesh already live under /Game/AcrXs/Stages/<Id>/ (not relocated): copy into the stage container
+        foreach (var sub in new[] { "Tex", "Mat", "Mesh" })
         {
             var src = Path.Combine(mod, "acr", "Content", "AcrXs", "Stages", id, sub);
             if (Directory.Exists(src)) Files.CopyTree(src, Path.Combine(outMod, "acr", "Content", "AcrXs", "Stages", id, sub));

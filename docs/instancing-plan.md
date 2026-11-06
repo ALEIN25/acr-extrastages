@@ -62,6 +62,14 @@ stage-owned StaticMesh package can be cloned from one and filled with DR2's geom
 LOD0 is the DR2 mesh; the far LOD is DR2's own billboard. DR2's materials stay as the MICs the build already writes. The same
 writer can later carry rocks, bushes and grass. Open points: CardRepresentationData, BodySetup, the number of LODs.
 
+## Offline proof (round 2; flag [instancing] enabled = 0 by default)
+
+Part 1: `StaticMeshPackage` clones SM_SpruceWales06 and writes DR2's fin_dougfir_tall_02_a (2,816 vertices, 2,823 triangles, trunk + 3 leaf
+materials as the build's MICs) plus a 2-view crossed-card billboard LOD; BodySetup without its capsule; byte layout in the class comment.
+Part 2: `LegacyPackage.AddExport` (+ RemoveImports, rebuilt preload dependencies, depends table) adds a plain HISM (NoCollision, one leaf
+cluster, identity tables) owned by BC_ReplayCamerasActor_C (it already serialises InstanceComponents) with 300 real placements.
+`Instancing.Check` runs inside stage-check; `acr-ref instancing-verify` re-reads both through CUE4Parse. Unproven until tested in game.
+
 ## The gap and the plan
 
 LegacyPackage has no way to add an export. Add one (96-byte export entry, preload dependencies, ExportCount, the owning
