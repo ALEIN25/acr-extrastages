@@ -92,3 +92,11 @@ switch, and how one leaf per component performs at full scale.
 
 Next: remove the card and stub of instanced trees, then every Finland species (per-species meshes, chunked components, a real cluster
 tree), InvisibleCheck counting instanced trunks as drawn, then trees.bin plants, rocks at full detail and the other locations.
+
+## Rollout (2026-11-07, offline; in-game untested)
+
+All tree templates (solid tree colliders, sSolidTree* / sSolidPalm*) of the stages in [instancing] stages get a mesh package and HISMs, one per template per 200 m chunk (one leaf
+cluster node each, no multi-level tree), in both gameplay cells. Fi 01 r2: 13 templates, 4696 trees, 542 components; Au 01 r3: 15 templates, 11057 trees, 516 components (cell exports
+1759 -> 2301 / 2275). Wood colliders (fence, stumps, logs: sLogWood) and bushes are not instanced. Instanced trees get no card, stub, merged mesh or (but for 4 / 14 trees whose real trunk
+is over a cell off DR2's straight capsule) proxy hull. InvisibleCheck counts the real triangles as drawn (trunk triangles like physics, conservative cell coverage; the collider of an
+instanced tree is compared at car height). Merged visuals: Fi 3,569,871 -> 3,177,256, Au 3,808,442 -> 3,233,465 triangles.

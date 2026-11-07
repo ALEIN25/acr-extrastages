@@ -57,7 +57,8 @@ internal static class VisualObjects
     public static (Dictionary<string, ProcMesh.Section> sections, JsonObject report, Func<string, string?> bark) Build(
         StageBuild.Ir ir, StageBuild.Placement pl, Toml cfg, ObjectColliders.Result objs, Func<V3, bool> inPhysicsBounds, string vegetation, string? canopies = null,
         Func<string, string, int, string?>? dr2Material = null, Func<string, string?>? cardTexture = null, Func<string, int>? cardFrames = null,
-        Func<string, string, int, string?>? trunkTexture = null, Func<string, string, int, string?>? treeMaterial = null)
+        Func<string, string, int, string?>? trunkTexture = null, Func<string, string, int, string?>? treeMaterial = null,
+        HashSet<string>? instanced = null)
     {
         int maxMeshTris = (int)cfg.Num("objects", "max_mesh_triangles");
         int sides = (int)cfg.Num("objects", "prism_sides");
@@ -161,6 +162,7 @@ internal static class VisualObjects
             foreach (var inst in stage["instances"]!.AsArray())
             {
                 var tname = inst!["template"]!.GetValue<string>();
+                if (instanced?.Contains(tname) == true) continue;   // instanced trees are not drawn here
                 if (!meshes.TryGetValue(tname, out var mesh) || mesh.TreeMat is not { } tm) continue;
                 var origin = Vector3.Transform(Vector3.Zero, ObjectColliders.Trs(inst["transform"]));
                 if (!inPhysicsBounds(pl.ToPhysics(origin.X, origin.Y, origin.Z))) continue;
@@ -178,7 +180,7 @@ internal static class VisualObjects
                 used += c.tris; realTrees.Add(c.id);
             }
         }
-        int realDrawn = 0, realTris = 0, realClipped = 0, realClippedTris = 0;
+        int realDrawn = 0, realTris = 0, realClipped = 0, realClippedTris = 0, instancedPlacements = 0, instancedSolid = 0;
         var realPer = new SortedDictionary<string, int>(); var cardedPer = new SortedDictionary<string, int>();
 
         foreach (var inst in stage["instances"]!.AsArray())
@@ -190,6 +192,12 @@ internal static class VisualObjects
             if (!inPhysicsBounds(pl.ToPhysics(origin.X, origin.Y, origin.Z))) { outside++; continue; }
             meshes.TryGetValue(tname, out var mesh);
             var shapes = kept.GetValueOrDefault(inst["id"]!.GetValue<string>()) ?? [];
+            // instanced trees (Instancing): one tree, one drawing. No card, trunk stub, proxy hull or merged real mesh from here; the collider is in BakedData as it was
+            if (instanced?.Contains(tname) == true)
+            {
+                instancedPlacements++; if (shapes.Count > 0) instancedSolid++;
+                continue;
+            }
             bool tree = IsTree(tname, shapes);
 
             var before = sec.ToDictionary(kv => kv.Key, kv => kv.Value.Pos.Count);
@@ -488,7 +496,8 @@ internal static class VisualObjects
             ["over_bounds_first"] = new JsonArray(overBounds.Take(8).Select(x => (JsonNode)$"{x.template} {x.id}: {x.ext:0.0} m vs bounds {x.bounds:0.0} m").ToArray()),
             ["collider_centres_checked_against_render_bounds"] = alignChecked,
             ["collider_centres_outside_render_bounds_plus_1m"] = misaligned,
-            ["solid_instances_drawn"] = treeInstances + meshInstances + proxyInstances,
+            ["solid_instances_drawn"] = treeInstances + meshInstances + proxyInstances + instancedSolid,
+            ["instanced_trees"] = new JsonObject { ["templates"] = instanced?.Count ?? 0, ["placements"] = instancedPlacements, ["with_collider"] = instancedSolid },
             ["solid_instances_total"] = objs.Kept.Select(s => s.Instance).Distinct().Count(),
             ["sections"] = new JsonObject(Classes.Where(c => sec[c].Idx.Count > 0).Select(c => KeyValuePair.Create(c,
                 (JsonNode?)$"{counts[c]} objects, {sec[c].Pos.Count} vertices, {sec[c].Idx.Count / 3} triangles"))),

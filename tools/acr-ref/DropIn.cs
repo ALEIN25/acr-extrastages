@@ -29,6 +29,8 @@ internal sealed class Dr2Materials
     public string Legacy => _legacy;
     public string OutRoot => _outRoot;
     public string PackageRoot => _root;
+    /// The instanced-tree plan of this stage-build (Instancing.Prepare runs once; both gameplay cells use it).
+    internal Instancing.Plan? InstancingPlan;
     public int TextureCount => _textures.Count;
     public int MicCount => _mics.Count;
     string? _orm, _normal;

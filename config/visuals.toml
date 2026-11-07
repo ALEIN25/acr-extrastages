@@ -250,14 +250,16 @@ decimate_ratio = 0.25    # each prototype is simplified once (quadric collapse, 
 min_triangles = 40       # prototypes (per material) at or below this are not simplified, and never below it
 
 [instancing]
-# Offline proof of instanced DR2 trees (docs/instancing-plan.md; needs --visuals-dr2): one DR2 tree template (render/objects.glb) is written
-# as a cooked StaticMesh package and its placements near the road as a HierarchicalInstancedStaticMeshComponent (NoCollision) in the
-# gameplay cell. Only the DR2 stage named by `stage` is affected; 0 = off everywhere.
+# Instanced DR2 trees (docs/instancing-plan.md; needs --visuals-dr2): every DR2 tree template of the stage (render/objects.glb; solid tree
+# colliders, sSolidTree* / sSolidPalm*; not fences, stumps or logs) is written as a cooked StaticMesh package, and ALL its placements as
+# HierarchicalInstancedStaticMeshComponents (NoCollision, one per template per chunk_m cell) in both gameplay cells. Such a tree gets no
+# card, no trunk stub, no proxy hull and no merged "tree:" mesh; its DR2 collider is unchanged. Only the DR2 stages listed in `stages`
+# are affected (matched against the forward route id); 0 = off everywhere. A template with no usable DR2 trunk or foliage material
+# keeps its cards and trunk stub (reported).
 enabled = 1
-stage = "finland_rally_01_route_2"   # the one DR2 stage it applies to
-template = "fin_dougfir_tall_02_a"   # DR2 template name in objects.glb / stage.json
-mesh_template = "/Game/Foliage/Trees/SpruceWales/SM_SpruceWales06"   # cooked ACR tree mesh cloned for it (extracted like the other legacy templates)
-near_m = 120             # instances within this distance of the route centreline
-max_instances = 300      # nearest first
+stages = ["finland_rally_01_route_2", "australia_rally_01_route_3"]
+mesh_template = "/Game/Foliage/Trees/SpruceWales/SM_SpruceWales06"   # cooked ACR tree mesh cloned for every species (extracted like the other legacy templates)
+chunk_m = 200            # one component per template per chunk_m x chunk_m cell, so the engine culls whole chunks
 billboard = 1            # a far LOD: DR2 own billboard strip as two crossed cards (MaskedMic), when the template has one
 billboard_screen_size = 0.2   # the billboard LOD is used below this screen size
+collider_gap_limit_cm = 25   # build check: collider and real trunk at 0.3 / 1.0 m (both ways) and 2.0 m (collider beyond trunk) above the base of every instanced tree within 12 m of the road, at most this far apart; trees the fit lists (kept DR2 capsule, or fitted but still over: multi-stem or forked) are exempt

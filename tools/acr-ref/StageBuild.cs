@@ -205,10 +205,11 @@ internal static class StageBuild
         report["surface_registry"] = new JsonObject { ["registered"] = registry.Count, ["remapped"] = remap };
         if (remap.Count > 0) Console.WriteLine($"surfaces: remapped unregistered {string.Join(", ", remap.Select(kv => kv.Key))} -> {groundFallback}");
 
-        int hostColliders = BuildBaked(ir, pl, legacy, outRoot, report, objectsCfg is null ? null : Toml.Load(objectsCfg), road, registry, out var objectShapes);
+        int hostColliders = BuildBaked(ir, pl, legacy, outRoot, report, objectsCfg is null ? null : Toml.Load(objectsCfg), road, registry, out var objectShapes, out var finishBaked);
         report["host_collider_count"] = hostColliders;
         Dr2Materials? dr2 = null;
         var cellInfo = BuildCell(o, ir, pl, legacy, outRoot, report, respawnMode, road, objectShapes, packageRoot, HostPaths.Forward, ref dr2);
+        finishBaked();   // BakedData with the object colliders as the forward cell left them
         BuildTables(o, ir, legacy, outRoot, keepPacenotes, additive, report, pacenoteMap is null ? null : Toml.Load(pacenoteMap), cellInfo, HostPaths.Forward);
         if (rev is not null)
         {
@@ -367,7 +368,7 @@ internal static class StageBuild
     }
 
     static int BuildBaked(Ir ir, Placement pl, string legacy, string outRoot, JsonObject report, Toml? objectsCfg, RoadCorridor road,
-                          HashSet<string> registry, out ObjectColliders.Result? objectShapes)
+                          HashSet<string> registry, out ObjectColliders.Result? objectShapes, out Action finish)
     {
         var path = HostPaths.Resolve(legacy, HostPaths.Baked);
         var pkg = new LegacyPackage(path);
@@ -496,7 +497,7 @@ internal static class StageBuild
         string AssetOf(Chunk c) => c.Material.StartsWith('/') ? c.Material : ir.Materials[c.Material];
 
         var reference = colliders[HostTemplateCollider];
-        using var ms = new MemoryStream();
+        var ms = new MemoryStream();
         ms.Write(data, 0, countAt);
         ms.Write(BitConverter.GetBytes(colliders.Count + all.Count));
         ms.Write(data, countAt + 4, simpleStart - countAt - 4);
@@ -511,6 +512,10 @@ internal static class StageBuild
             ?? throw new InvalidOperationException($"no always-active (None) key in the {which} stride map");
         NoneKey(meshMap, "mesh").Strides.Add(new BakedEdit.Stride { Index = (uint)colliders.Count, Num = (uint)all.Count });
 
+        // the object colliders are serialised by finish(), after the visuals of the forward cell have run: instanced trees' capsules are fitted to their real trunks there
+        // (Instancing.FitColliders), which needs the instancing plan
+        void Finish()
+        {
         int simpleAdded = 0;
         if (objs is not null && objs.Kept.Any(s => s.MeshPhysics is null))
         {
@@ -534,6 +539,8 @@ internal static class StageBuild
             ms.Write(BakedEdit.WriteMap(simpleMap));
             ms.Write(simpleMapData, sp, simpleMapData.Length - sp);
             r["simple_added"] = simpleAdded;
+            // the DR2 instance of each added simple entry, in file order (ColliderFit.CheckColliders pairs the written capsules with their trees by it)
+            r["simple_instances"] = new JsonArray(objs.Kept.Where(s => s.MeshPhysics is null).Select(s => (JsonNode)s.Instance).ToArray());
             r["simple_stride"] = $"{{{hostSimple}, {simpleAdded}}} in the None key";
             r["object_owner"] = System.Text.Encoding.ASCII.GetString(owner[20..^1]);
         }
@@ -552,6 +559,8 @@ internal static class StageBuild
         r["dr2_triangles_per_material"] = new JsonObject(perMaterial.Select(kv => KeyValuePair.Create(kv.Key, (JsonNode?)kv.Value)));
         r["uexp_bytes"] = $"{data.Length} -> {outData.Length}";
         Console.WriteLine($"BakedData: {colliders.Count} host + {all.Count} DR2 colliders, uexp {data.Length} -> {outData.Length} bytes");
+        }
+        finish = Finish;
         objectShapes = objs;
         return colliders.Count;
     }
@@ -980,8 +989,11 @@ internal static class StageBuild
                 ? NewProbe(ir, pl, objCfg) : null;
             failures += Visuals.Check(new LegacyPackage(HostPaths.Resolve(root, HostPaths.Cell)), ir, pl, Toml.Load(visualsCfg), opt, w,
                                       report["cell"]?["visuals"], probe, root, report["options"]?["package_root"]?.GetValue<string>());
+            // instanced trees: both gameplay cells carry them (each variant streams only its own cell); the mesh packages are shared, checked once
             if (report["cell"]?["visuals"]?["instancing"] is { } instReport)
-                failures += Instancing.Check(new LegacyPackage(HostPaths.Resolve(root, HostPaths.Cell)), root, ir, pl, Toml.Load(visualsCfg), instReport, InPhysicsBounds, w);
+                failures += Instancing.Check(new LegacyPackage(HostPaths.Resolve(root, HostPaths.Cell)), root, ir, pl, Toml.Load(visualsCfg), instReport, report["cell"]!["visuals"]!, InPhysicsBounds, w, "instancing (forward cell):", meshes: true);
+            if (report["reverse_cell"]?["visuals"]?["instancing"] is { } revInstReport)
+                failures += Instancing.Check(new LegacyPackage(HostPaths.Resolve(root, HostPaths.Reverse.Cell)), root, ir, pl, Toml.Load(visualsCfg), revInstReport, report["reverse_cell"]!["visuals"]!, InPhysicsBounds, w, "instancing (reverse cell):", meshes: false);
         }
 
         if (report["options"]?["scenery"]?.GetValue<string>() is { } sceneryCfg)
@@ -1028,7 +1040,12 @@ internal static class StageBuild
             for (int i = 0; i < ns; i++) drawn.Add(ProcMesh.ReadSection(comp.Data, ref sp, out _));
             var secNames = (report["cell"]?["visuals"]?["sections"] as JsonArray)?.Select(x => x!.GetValue<string>()).ToList();
             var shapes = InvisibleCheck.SimpleShapes(data, simple, invAdded.GetValue<int>());
-            failures += InvisibleCheck.Check(InvisibleCheck.Settings.From(Toml.Load(invCfg)), ir, pl, dr2, shapes, drawn, secNames, w, report as JsonObject);
+            Action<InvisibleCheck.Drawn, int>? instDraw = null; Func<InvisibleCheck.Shape, double?>? instBase = null;
+            if (report["cell"]?["visuals"]?["instancing"] is { } instRep) (instDraw, instBase) = Instancing.FromCell(gcell, root, instRep);
+            if (report["cell"]?["visuals"]?["instancing"] is { } instRep2)
+                failures += ColliderFit.CheckColliders(root, ir, pl, Toml.Load(report["options"]!["visuals"]!.GetValue<string>()), instRep2, shapes, ((JsonArray)report["baked"]!["simple_instances"]!).Select(x => x!.GetValue<string>()).ToList(), InPhysicsBounds, w);
+            failures += InvisibleCheck.Check(InvisibleCheck.Settings.From(Toml.Load(invCfg)), ir, pl, dr2, shapes, drawn, secNames, w, report as JsonObject,
+                                             instDraw, instBase);
         }
         float hostTop = cols.Take(hostCount).Max(c => c.Max.Y);
         float dr2Min = dr2.Min(c => c.Min.Y);

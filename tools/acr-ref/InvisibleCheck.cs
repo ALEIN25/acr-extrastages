@@ -86,6 +86,44 @@ internal static class InvisibleCheck
             f(cid, Math.Max(a.Z, Math.Max(b.Z, c.Z)));
     }
 
+    /// Conservative variant of Raster for the real triangles of instanced meshes: f(cell, z) for every cell whose SQUARE the triangle overlaps in plan, with the
+    /// height at the point of the triangle nearest the cell's centre. Raster samples cell centres only, so a trunk thinner than a cell can fall between them and leave the
+    /// cells under its collider "nothing drawn" although it stands right there. Near-vertical triangles keep Raster's own edge sampling. Never used for the sections the
+    /// build draws itself, nor for the physics: it only credits real geometry with the cells it touches.
+    static void RasterCover(Grid g, Vector3 a, Vector3 b, Vector3 c, Action<int, double> f)
+    {
+        double den = (b.Y - c.Y) * (a.X - c.X) + (c.X - b.X) * (a.Y - c.Y);
+        double lo = Math.Min(a.Z, Math.Min(b.Z, c.Z)), hi = Math.Max(a.Z, Math.Max(b.Z, c.Z));
+        if (Math.Abs(den) / 2 < 0.1 * g.Cell * g.Cell && hi - lo > 1 || Math.Abs(den) < 1e-6) { Raster(g, a, b, c, f); return; }
+        int i0 = g.I(Math.Min(a.X, Math.Min(b.X, c.X))), i1 = g.I(Math.Max(a.X, Math.Max(b.X, c.X)));
+        int j0 = g.I(Math.Min(a.Y, Math.Min(b.Y, c.Y))), j1 = g.I(Math.Max(a.Y, Math.Max(b.Y, c.Y)));
+        if ((long)(i1 - i0 + 1) * (j1 - j0 + 1) > 4_000_000) return;
+        var tri = new[] { a, b, c };
+        for (int i = i0; i <= i1; i++)
+            for (int j = j0; j <= j1; j++)
+            {
+                if (!g.Index.TryGetValue((i, j), out var id)) continue;
+                double x0 = i * g.Cell, y0 = j * g.Cell, x1 = x0 + g.Cell, y1 = y0 + g.Cell;
+                bool apart = false;
+                for (int k = 0; k < 3 && !apart; k++)
+                {
+                    var p = tri[k]; var q = tri[(k + 1) % 3];
+                    double nx = q.Y - p.Y, ny = p.X - q.X;
+                    double t0 = nx * a.X + ny * a.Y, t1 = nx * b.X + ny * b.Y, t2 = nx * c.X + ny * c.Y;
+                    double tmin = Math.Min(t0, Math.Min(t1, t2)), tmax = Math.Max(t0, Math.Max(t1, t2));
+                    double s0 = nx * x0 + ny * y0, s1 = nx * x1 + ny * y0, s2 = nx * x0 + ny * y1, s3 = nx * x1 + ny * y1;
+                    apart = Math.Min(Math.Min(s0, s1), Math.Min(s2, s3)) > tmax || Math.Max(Math.Max(s0, s1), Math.Max(s2, s3)) < tmin;
+                }
+                if (apart) continue;
+                double x = g.X(i), y = g.Y(j);
+                double l1 = Math.Max(0, ((b.Y - c.Y) * (x - c.X) + (c.X - b.X) * (y - c.Y)) / den);
+                double l2 = Math.Max(0, ((c.Y - a.Y) * (x - c.X) + (a.X - c.X) * (y - c.Y)) / den);
+                double l3 = Math.Max(0, 1 - (((b.Y - c.Y) * (x - c.X) + (c.X - b.X) * (y - c.Y)) / den) - (((c.Y - a.Y) * (x - c.X) + (a.X - c.X) * (y - c.Y)) / den));
+                double sum = l1 + l2 + l3;
+                f(id, (l1 * a.Z + l2 * b.Z + l3 * c.Z) / sum);
+            }
+    }
+
     /// The box's 12 triangles and the capsule as a 12-sided prism with flat ends (UE cm).
     internal static IEnumerable<(Vector3, Vector3, Vector3)> Triangles(Shape s)
     {
@@ -211,7 +249,9 @@ internal static class InvisibleCheck
         public readonly IReadOnlyList<string>? Names;
         public int N => G.Cells.Count;
 
-        public Drawn(Settings o, List<V3> centre, IReadOnlyList<ProcMesh.Section> drawn, IReadOnlyList<string>? names)
+        /// extra: further drawn surface that is not in the sections (instanced trees: their real triangles), added after them; given the grid and
+        /// the section index its cells report as the drawn top.
+        public Drawn(Settings o, List<V3> centre, IReadOnlyList<ProcMesh.Section> drawn, IReadOnlyList<string>? names, Action<Drawn, int>? extra = null)
         {
             O = o;
             G = new Grid(o.CellM * 100);
@@ -254,6 +294,7 @@ internal static class InvisibleCheck
                 int si = i;
                 for (int t = 0; t + 2 < s.Idx.Count; t += 3) Raster(G, At(s, t, 0), At(s, t, 1), At(s, t, 2), (id, z) => Add(id, z, si));
             }
+            extra?.Invoke(this, drawn.Count);
         }
 
         /// Adds a drawn ground triangle after construction (the physics fill, pass by pass): ground height first, then the
@@ -264,6 +305,27 @@ internal static class InvisibleCheck
             var ground = Ground;
             Raster(G, a, b, c, (id, z) => { if (z > ground[id]) ground[id] = z; });
             Raster(G, a, b, c, (id, z) => Add(id, z, section));
+        }
+
+        /// Adds real geometry that the sections do not hold (instanced trees): every cell its triangle overlaps counts, see RasterCover.
+        public void AddSurfaceCover(Vector3 a, Vector3 b, Vector3 c, int section = -1) => RasterCover(G, a, b, c, (id, z) => Add(id, z, section));
+
+        /// Adds a real trunk triangle of an instanced tree, treated like the collider it stands for: one that reaches into car height counts over its whole plan footprint at
+        /// the height clamped to the band, as PhysicsRaster does with the collider's own long faces. A trunk leaning like its collider thus covers the cells the collider covers
+        /// at car height (their long shadows), while a collider with no trunk triangle over it is still not covered.
+        public void AddTrunk(Vector3 a, Vector3 b, Vector3 c, int section = -1)
+        {
+            float lo = Math.Min(a.Z, Math.Min(b.Z, c.Z));
+            RasterCover(G, a, b, c, (id, z) =>
+            {
+                if (!double.IsNegativeInfinity(Ground[id]))
+                {
+                    double top = Ground[id] + O.BandM * 100;
+                    if (lo > top) return;
+                    z = Math.Min(z, top);
+                }
+                if (z > Top[id]) { Top[id] = z; TopSection[id] = section; }
+            });
         }
 
         /// Adds a drawn surface triangle that is not ground (a proxy of a collider): drawn top only.
@@ -341,11 +403,14 @@ internal static class InvisibleCheck
     }
 
     public static int Check(Settings o, StageBuild.Ir ir, StageBuild.Placement pl, List<BakedEdit.Collider> physicsMeshes, List<Shape> shapes,
-                            List<ProcMesh.Section> drawn, List<string>? names, TextWriter w, JsonObject? report = null)
+                            List<ProcMesh.Section> drawn, List<string>? names, TextWriter w, JsonObject? report = null, Action<Drawn, int>? extraDrawn = null,
+                            Func<Shape, double?>? instancedBase = null)
     {
         int failures = 0;
         void C(bool ok, string what) { w.WriteLine($"{Advisory.Verdict(ok, what, out var bad)} {what}"); if (bad) failures++; }
-        var dg = new Drawn(o, ir.Centre.Select(pl.ToUe).ToList(), drawn, names);
+        // instanced trees (Instancing.DrawnFromCell): their triangles are drawn surface under a section of their own, named like the other objects
+        if (extraDrawn is not null && names is not null) names = [.. names, "objects:instanced_trees"];   // index drawn.Count, where the extra surface reports
+        var dg = new Drawn(o, ir.Centre.Select(pl.ToUe).ToList(), drawn, names, extraDrawn);
         var g = dg.G; var route = dg.Route; int N = dg.N;
         var visGround = dg.Ground; var visTop = dg.Top;
         var phyTop = new double[N]; Array.Fill(phyTop, double.NegativeInfinity);
@@ -356,8 +421,16 @@ internal static class InvisibleCheck
         foreach (var (col, isObject) in physicsMeshes.Select(c => (c, false)))
             for (int t = 0; t + 2 < col.Indices.Length; t += 3)
                 Phy(Ue(col.Positions, col.Indices[t]), Ue(col.Positions, col.Indices[t + 1]), Ue(col.Positions, col.Indices[t + 2]), 1);
+        // instanced trees: a tall capsule that is the collider of an instanced tree (its axis passes at its base, Instancing.FromCell) is compared at car height, the only
+        // height a car meets it at: its long faces lean away from the base, and their plan shadow far up the trunk is not an obstacle at the cells below it. Any other tall
+        // capsule, e.g. one with no real trunk placed at its base, keeps its whole shadow.
+        int carHeightCapsules = 0;
         foreach (var sh in shapes)
-            foreach (var (a, b, c) in Triangles(sh)) Phy(a, b, c, sh.Box ? (byte)3 : (byte)4);
+        {
+            IEnumerable<(Vector3, Vector3, Vector3)> tris = Triangles(sh);
+            if (instancedBase?.Invoke(sh) is { } baseZ) { tris = VisualObjects.ClipTris(tris, (float)(baseZ + o.BandM * 100 + 50)); carHeightCapsules++; }
+            foreach (var (a, b, c) in tris) Phy(a, b, c, sh.Box ? (byte)3 : (byte)4);
+        }
 
         // compare
         var flag = new byte[N];   // 1 invisible obstacle, 2 nothing drawn over physics
@@ -417,6 +490,7 @@ internal static class InvisibleCheck
             report["invisible"] = new JsonObject
             {
                 ["cells"] = N, ["cell_m"] = o.CellM, ["radius_m"] = o.RadiusM, ["tolerance_m"] = o.ToleranceM, ["band_m"] = o.BandM,
+                ["instanced_tree_colliders_at_car_height"] = carHeightCapsules,
                 ["obstacles"] = obstacles.Count, ["coarse_over_drawn_objects"] = coarse.Count, ["obstacles_within_drive_m"] = near.Count, ["undrawn"] = holes.Count, ["list"] = list,
             };
         foreach (var (c, at) in near.Take(25))

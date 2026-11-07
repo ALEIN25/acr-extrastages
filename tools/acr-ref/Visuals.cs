@@ -218,6 +218,7 @@ internal static class Visuals
         // offline post check relies on through the vertex layout).
         var classTex = new JsonObject();
         Func<string, string?>? barkOfTemplate = null;   // set once the objects are built: a tree template's DR2 trunk texture
+        Instancing.Plan? instancingPlan = null;         // [instancing]: the instanced trees of this stage, set before the objects are built
         var classDiffuse = new Dictionary<string, string?>();
         List<JsonNode>? classMaterials = null;
         int? ClassMat(string report, string cls, ProcMesh.Section s, bool boxUv)
@@ -437,19 +438,24 @@ internal static class Visuals
                 return dr2!.HasTexture(n) && dr2.Transparency(n) > 0.05 ? n : null;
             }
             int CardFrames(string tex) { var d = new Dds(Path.Combine(ir.Dir, "textures", tex + ".dds")); return Math.Max(1, d.Width / Math.Max(1, d.Height)); }
-            var (objSecs, objRep, barkOf) = VisualObjects.Build(ir, pl, cfg, objects, inPhysicsBounds, opt.Vegetation, opt.Canopies,
-                                                        objByName is null ? null : KeyIfDrawn,
-                                                        opt.Vegetation == "cards" && objByName is not null ? CardTexture : null, CardFrames,
-                                                        objByName is null ? null : TrunkOf, objByName is null ? null : TreeKey);
-            barkOfTemplate = barkOf;
-            // [instancing] (off by default): one DR2 tree template as a StaticMesh package + a HISM of its placements (Instancing)
+            // [instancing] (off by default, per stage): every DR2 tree template as a StaticMesh package, its placements as HISMs (Instancing). Decided
+            // before the objects are built: those templates get no card, trunk stub, proxy or merged mesh there. Prepared once per stage-build (both cells).
             if (Instancing.Enabled(cfg, ir.Id))
             {
                 if (objByName is null) throw new ArgumentException("[instancing] needs --visuals-dr2 with the objects section on");
-                r["instancing"] = Instancing.Build(cell, ir, pl, cfg, opt, dr2!, inPhysicsBounds,
+                instancingPlan = dr2!.InstancingPlan ??= Instancing.Prepare(ir, pl, cfg, opt, dr2, inPhysicsBounds,
                     (template, mat, tris) => TreeKey(template, mat, tris) is { } k ? (k, dr2!.ObjectMic(treeDiffuse[k]!)) : null,
+                    (template, mat, tris) => TrunkOf(template, mat, tris) is not null,
                     template => CardTexture(template) is { } cardTex ? (dr2!.MaskedMic("card_" + cardTex, dr2.CardTexture(cardTex), dr2.CardNormal(cardTex)), CardFrames(cardTex)) : null);
             }
+            // DR2's capsules of the instanced trees are our own physics data: fitted to the real trunks before BakedData is written (StageBuild.Finish), once per stage-build
+            if (instancingPlan is not null && !instancingPlan.Fitted && objects is not null) { instancingPlan.Report["collider_fit"] = ColliderFit.FitAll(instancingPlan, objects, cfg.Num("instancing", "collider_gap_limit_cm")); instancingPlan.Fitted = true; }
+            var (objSecs, objRep, barkOf) = VisualObjects.Build(ir, pl, cfg, objects, inPhysicsBounds, opt.Vegetation, opt.Canopies,
+                                                        objByName is null ? null : KeyIfDrawn,
+                                                        opt.Vegetation == "cards" && objByName is not null ? CardTexture : null, CardFrames,
+                                                        objByName is null ? null : TrunkOf, objByName is null ? null : TreeKey, instancingPlan?.Templates);
+            barkOfTemplate = barkOf;
+            if (instancingPlan is not null) r["instancing"] = Instancing.AddComponents(cell, instancingPlan);
             foreach (var (key, s) in objSecs.Where(kv => kv.Key.StartsWith(VisualObjects.CardPrefix) && kv.Value.Idx.Count > 0).OrderBy(kv => kv.Key))
             {
                 var tex = key[VisualObjects.CardPrefix.Length..];
@@ -574,13 +580,22 @@ internal static class Visuals
             // repeated until nothing is added: the fill raises the drawn ground, and with it the car-height band, so a second
             // pass can find faces the first one counted as overhead (as the check, which sees the fill as ground, does)
             var dg = new InvisibleCheck.Drawn(inv, ir.Centre.Select(pl.ToUe).ToList(), sections, sectionNames.Select(x => x!.GetValue<string>()).ToList());
+            // instanced trees are drawn by their HISMs: their real triangles count as drawn here, so their trunks need no proxy
+            if (instancingPlan is not null) Instancing.AddDrawn(dg, instancingPlan, sections.Count);
             // closing loop for object colliders (boxes, capsules, cone meshes): each one the check would still find standing above
             // everything drawn is drawn itself, its own triangles, double-sided, into a "proxy:" section (bark for trees, roots,
             // bushes and grass, else "other"); where the hull's upper faces are overhead to the check (above the car-height band)
             // the collider is capped with a lid at car height over the cells still flagged, as the clipped canopies are
             var proxy = new SortedDictionary<string, ProcMesh.Section>();
             var proxyKeys = new Dictionary<string, Dictionary<Vector3, int>[]>();
-            var colliders = (objects?.Kept ?? []).Select(s => (s, tris: InvisibleCheck.ColliderTriangles(s), hull: new bool[1], lid: new bool[1])).Where(x => x.tris.Count > 0).ToList();
+            // instanced trees: the tall capsule collider of a tree is compared at car height only (as InvisibleCheck.Check does for the same colliders): its long faces lean away from
+            // the base, and their plan shadow far up the trunk is not an obstacle at the cells below it. What the real trunk has to cover is the part a car can meet.
+            var treeBase = instancingPlan?.BaseZ;
+            double carClip = inv.BandM * 100 + 50;
+            List<(Vector3, Vector3, Vector3)> CarHeight(ObjectColliders.Shape s, List<(Vector3, Vector3, Vector3)> tris) =>
+                treeBase is not null && instancingPlan!.Species.ContainsKey(s.Template) && treeBase.TryGetValue(s.Instance, out var bz) && VisualObjects.TrunkClipZ(s, carClip, bz) is { } cz
+                    ? VisualObjects.ClipTris(tris, (float)cz).ToList() : tris;
+            var colliders = (objects?.Kept ?? []).Select(s => (s, tris: CarHeight(s, InvisibleCheck.ColliderTriangles(s)), hull: new bool[1], lid: new bool[1])).Where(x => x.tris.Count > 0).ToList();
             int proxyShapes = 0, proxyTris = 0, proxyLids = 0;
             double cellCm = inv.CellM * 100, cellArea = inv.CellM * inv.CellM;
             int minCells = Math.Max(1, (int)Math.Ceiling(inv.MinAreaM2 / cellArea));
@@ -697,7 +712,12 @@ internal static class Visuals
             }
             int proxied = colliders.Count(x => x.hull[0]);
             r["colliders_drawn_as_proxy"] = proxied;
-            r["proxy"] = new JsonObject { ["colliders"] = proxied, ["with_lid"] = colliders.Count(x => x.lid[0]), ["lid_strips"] = proxyLids, ["triangles"] = proxyTris, ["candidates"] = colliders.Count };
+            r["proxy"] = new JsonObject
+            {
+                ["colliders"] = proxied, ["with_lid"] = colliders.Count(x => x.lid[0]), ["lid_strips"] = proxyLids, ["triangles"] = proxyTris, ["candidates"] = colliders.Count,
+                ["of_instanced_trees"] = instancingPlan is null ? 0 : colliders.Count(x => x.hull[0] && instancingPlan.Species.ContainsKey(x.s.Template)),
+                ["of_instanced_trees_ids"] = new JsonArray((instancingPlan is null ? [] : colliders.Where(x => x.hull[0] && instancingPlan.Species.ContainsKey(x.s.Template)).Select(x => x.s.Instance).Distinct().Order().ToArray()).Select(x => (JsonNode)x).ToArray()),
+            };
             Console.WriteLine($"visuals: colliders_drawn_as_proxy: {proxied} of {colliders.Count} object colliders stood above everything drawn; {proxyTris} triangles ({proxyLids} lid strips)");
             // rock surfaces on the stage's main steep-rock slice, the rest on its ground texture
             var rockTex = steepRock is { Count: > 0 } ? steepRock.MaxBy(kv => kv.Value.Idx.Count).Key : null;

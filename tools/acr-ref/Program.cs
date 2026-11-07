@@ -61,6 +61,7 @@ internal static class Program
                 "bounds-probe" => Bounds.Probe(opts),
                 "stage-fit" => StageFit.Run(opts),
                 "instancing-verify" => InstancingVerify.Run(opts),
+                "instancing-gap" => InstancingGap.Run(opts),
                 _ => Fail($"unknown command '{args[0]}'"),
             };
         }
