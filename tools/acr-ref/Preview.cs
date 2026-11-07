@@ -74,7 +74,7 @@ internal static class Preview
         {
             var sec = sections[s];
             var name = s < names.Count ? names[s]!.GetValue<string>() : $"section{s}";
-            if (sec.Idx.Count == 0 || name == "dummy") continue;
+            if (sec.Idx.Count == 0 || name == "dummy" || name.StartsWith("instancing:keep:")) continue;
             int n = sec.Pos.Count;
             var pos = new byte[n * 12]; var nrm = new byte[n * 12]; var uv = new byte[n * 8];
             var mn = new Vector3(float.MaxValue); var mx = new Vector3(float.MinValue);

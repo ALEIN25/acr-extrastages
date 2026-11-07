@@ -257,7 +257,7 @@ min_triangles = 40       # prototypes (per material) at or below this are not si
 # are affected (matched against the forward route id); 0 = off everywhere. A template with no usable DR2 trunk or foliage material
 # keeps its cards and trunk stub (reported).
 enabled = 1
-stages = ["finland_rally_01_route_2", "australia_rally_01_route_3"]
+stages = []   # off: instanced trees do not render in game yet (docs/instancing-bug-brief.md)
 mesh_template = "/Game/Foliage/Trees/SpruceWales/SM_SpruceWales06"   # cooked ACR tree mesh cloned for every species (extracted like the other legacy templates)
 chunk_m = 200            # one component per template per chunk_m x chunk_m cell, so the engine culls whole chunks
 billboard = 1            # a far LOD: DR2 own billboard strip as two crossed cards (MaskedMic), when the template has one

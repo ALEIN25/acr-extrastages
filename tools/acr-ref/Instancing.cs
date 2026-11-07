@@ -845,7 +845,7 @@ internal static class Instancing
         var real = (o?["real_trees"]?["per_template_real"] as JsonObject)?.Select(kv => kv.Key).ToHashSet() ?? [];
         var secNames = (visuals["sections"] as JsonArray)?.Select(x => x!.GetValue<string>()).ToList() ?? [];
         // cards, stubs and merged meshes: none. (proxy: sections are the invisible-obstacle loop's hulls, counted separately below.)
-        var leak = names.Where(t => perTemplate.Contains(t) || real.Contains(t) || secNames.Any(s => !s.StartsWith("proxy:") && (s.Contains(t + "_lod_d") || s.Contains(t + "_tr_d")))).ToList();
+        var leak = names.Where(t => perTemplate.Contains(t) || real.Contains(t) || secNames.Any(s => !s.StartsWith("proxy:") && !s.StartsWith("instancing:keep:") && (s.Contains(t + "_lod_d") || s.Contains(t + "_tr_d")))).ToList();
         int skipped = o?["instanced_trees"]?["placements"]?.GetValue<int>() ?? -1;
         int proxied = visuals["proxy"]?["of_instanced_trees"]?.GetValue<int>() ?? -1;
         // A proxy hull is drawn for an instanced tree only where the invisible-obstacle loop finds that its real trunk does not cover the collider at car height (the trunk

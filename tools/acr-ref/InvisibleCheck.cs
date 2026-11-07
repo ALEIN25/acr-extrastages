@@ -289,7 +289,7 @@ internal static class InvisibleCheck
             }
             for (int i = 0; i < drawn.Count; i++)
             {
-                if (names is not null && i < names.Count && names[i] == "dummy") continue;
+                if (names is not null && i < names.Count && (names[i] == "dummy" || names[i].StartsWith("instancing:keep:"))) continue;
                 var s = drawn[i];
                 int si = i;
                 for (int t = 0; t + 2 < s.Idx.Count; t += 3) Raster(G, At(s, t, 0), At(s, t, 1), At(s, t, 2), (id, z) => Add(id, z, si));

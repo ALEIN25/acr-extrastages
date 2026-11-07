@@ -744,6 +744,21 @@ internal static class Visuals
             dr2Rep["packages"] = dr2.Log.DeepClone();
             r["dr2"] = dr2Rep;
         }
+        // [instancing]: the HISMs' materials are imported by the cell only when its merged mesh also uses them (in game a species' HISMs render only then),
+        // so each MIC of the instanced meshes (every LOD, the billboard) gets a zero-area triangle of its own, 50 m below the start gate (as the dummy)
+        if (instancingPlan is not null)
+        {
+            var keepMics = instancingPlan.Species.Values.SelectMany(s => ((JsonArray)s.Report["materials"]!).Select(x => x!.GetValue<string>())).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToList();
+            foreach (var mic in keepMics)
+            {
+                var keep = new ProcMesh.Section();
+                foreach (var off in new[] { Vector3.Zero, new Vector3(1, 0, 0), new Vector3(2, 0, 0) }) { keep.Pos.Add(d0 + off); keep.Nrm.Add(Vector3.UnitZ); keep.Uv.Add(Vector2.Zero); }
+                keep.Idx.AddRange([0u, 2u, 1u]);
+                sections.Add(keep); mats.Add(MatPath(mic)); sectionNames.Add("instancing:keep:" + mic[(mic.LastIndexOf('/') + 1)..]);
+            }
+            ((JsonObject)r["instancing"]!)["keep_placeholders"] = keepMics.Count;
+            Console.WriteLine($"visuals: instancing: {keepMics.Count} placeholder sections keep the instanced meshes' materials imported");
+        }
         r["sections"] = sectionNames;
         r["triangles_total"] = sections.Sum(s => s.Idx.Count / 3);
         // objects carry DR2 normal maps: tangents along their UVs (the writer's default only follows the normal)
@@ -956,7 +971,7 @@ internal static class Visuals
             for (int i = 0; i < n; i++)
             {
                 var name = names[i]!.GetValue<string>();
-                if (name is "dummy" or "terrain" or "road" or "gates" || name.StartsWith("terrain:") || name.StartsWith("terrain_low:") || name == "terrain_gap" || name.StartsWith("road:")) continue;
+                if (name is "dummy" or "terrain" or "road" or "gates" || name.StartsWith("instancing:keep:") || name.StartsWith("terrain:") || name.StartsWith("terrain_low:") || name == "terrain_gap" || name.StartsWith("road:")) continue;
                 if (name.StartsWith("proxy:"))
                 {
                     // copies of kept colliders (the collision is there either way; hiding them would be an invisible obstacle)
