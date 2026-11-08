@@ -537,7 +537,7 @@ internal static class VisualObjects
                         if (!keepTri[t]) overheadDropped++; else overheadSections.Add("objects:" + Dr2Prefix + mesh.TriMaterial[t]);
                     }
                 }
-                if (fitBoxes)
+                if (fitBoxes && overheadRe?.IsMatch(tname) != true)
                 {
                     var vertices = mesh.Idx.Distinct().Select(i => Ue(Vector3.Transform(mesh.Pos[i], m))).ToArray();
                     foreach (var shape in shapes.Where(s => s.Box is not null))
@@ -556,7 +556,7 @@ internal static class VisualObjects
                     foreach (var shape in shapes.Where(s => s.Box is not null))
                         shape.EnclosedFittedInterior = ColliderFit.EnclosedBox(shape, triangles, coverage);
                 }
-                if (cfg.Num("objects", "precise_colliders") != 0 && objs.PreciseFitted.Add(inst["id"]!.GetValue<string>()))
+                if (overheadRe?.IsMatch(tname) != true && cfg.Num("objects", "precise_colliders") != 0 && objs.PreciseFitted.Add(inst["id"]!.GetValue<string>()))
                 {
                     var triangles = mesh.Idx.Select(i => Ue(Vector3.Transform(mesh.Pos[i], m))).ToArray();
                     foreach (var shape in shapes.ToArray().Where(s => s.Box is not null && !s.EnclosedFittedInterior))
@@ -643,12 +643,18 @@ internal static class VisualObjects
         }
         // kept colliders above car height over the road (ObjectColliders only checks the car-height band)
         var overhead = new JsonArray();
+        // [objects] overhead_passable_above_m: an overhead structure's colliders over the road that start this high above the
+        // centreline are left out. DR2's boxes approximate the arch tube below the drawn curve, and arches stand on crests where
+        // the car leaves the ground: it was pushed down into the road at 6.2 km of Kailajärvi. Drawn and passable is not an invisible obstacle.
+        double passableAbove = cfg["objects"].TryGetValue("overhead_passable_above_m", out var opa) && opa is double opad ? opad * 100 : double.PositiveInfinity;
+        var passable = new List<ObjectColliders.Shape>();
         foreach (var s in objs.Kept)
         {
             double d = Math.Max(s.FootprintUe.Max(q => objs.Probe.Depth(q, s.FootprintRadius, objs.Probe.HMax, overhang)),
                                 ShapeDepth(s, objs.Probe, objs.Probe.HMax, overhang));
             if (d <= meshPenLimit) continue;
             var lo = s.FootprintUe.Min(q => q.Z - objs.Probe.Road.QueryNear(q.X, q.Y).z) - s.FootprintRadius;
+            if (overheadRe?.IsMatch(s.Template) == true && lo >= passableAbove) { passable.Add(s); continue; }
             var c = s.FootprintUe.Aggregate((a, b) => a + b) * (1.0 / s.FootprintUe.Count);
             double reach = s.FootprintUe.Max(q => (q - c).Length) + s.FootprintRadius;
             overhead.Add(new JsonObject
@@ -656,6 +662,11 @@ internal static class VisualObjects
                 ["what"] = $"{s.Template} {s.Instance} {s.Kind} {s.Material}: {d / 100:0.0} m into the corridor, lowest {lo / 100:0.0} m above the centreline",
                 ["at_cm"] = new JsonArray(Math.Round(c.X), Math.Round(c.Y), Math.Round(c.Z)), ["reach_cm"] = Math.Ceiling(reach),
             });
+        }
+        if (passable.Count > 0)
+        {
+            foreach (var s in passable) objs.Kept.Remove(s);
+            Console.WriteLine($"objects: {passable.Count} overhead colliders over the road left out (lowest point at least {passableAbove / 100:0.0} m up): {string.Join(", ", passable.Select(s => s.Instance).Distinct())}");
         }
         var largest = extents.OrderByDescending(x => x.ext).Take(8).ToList();
         var overBounds = extents.Where(x => !double.IsNaN(x.bounds) && x.ext > x.bounds * maxOverBounds + 1).ToList();

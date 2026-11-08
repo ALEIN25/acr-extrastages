@@ -313,7 +313,7 @@ internal static class Visuals
         string? DetailNormal(bool roadTile)
         {
             if (detailNormal.TryGetValue(roadTile, out var known)) return known;
-            var n = dr2!.PairedNormal(roadTile ? dr2.RoadTexture : dr2.TerrainTexture) is { } nn ? dr2.NormalTexture(nn) : null;
+            var n = dr2!.PairedNormal(roadTile ? dr2.RoadTexture : dr2.TerrainTexture) is { } nn ? dr2.NormalTexture(nn, breakRepeat: roadTile && cfg.Str("dr2_textures", "road_detail_mode") == "blended") : null;
             dr2Rep[roadTile ? "road_detail_normal" : "terrain_detail_normal"] = n ?? "none (no paired DR2 normal map)";
             return detailNormal[roadTile] = n;
         }
@@ -820,6 +820,7 @@ internal static class Visuals
         if (chunkMode == "") chunkMode = "off";
         if (chunkMode is not ("off" or "two_existing")) throw new ArgumentException("visuals.chunk_mode must be off or two_existing");
         JsonObject? farCarrier = null;
+        var previewCarriers = new List<Preview.Carrier>();
         if (chunkMode == "two_existing")
         {
             if (opt.Host != "start" || opt.Owner is not null) throw new ArgumentException("two_existing requires the start host and native owners");
@@ -865,6 +866,7 @@ internal static class Visuals
             var readback = ProcMesh.Parse(farData, other); cursor = readback.Slots[3].at + 4;
             for (int i = 0; i < nativeCount; i++) { var s = ProcMesh.ReadSection(farData, ref cursor, out _); if (s.Pos.Count != far[i].Pos.Count || s.Idx.Count != far[i].Idx.Count) throw new InvalidDataException("Native ring counts changed"); }
             cell.SetExportData(other, farData);
+            previewCarriers.Add(new Preview.Carrier($"{cell.ExportName(cell.ExportOuter(other) - 1)}/{cell.ExportName(other)}", far, farMats, farNames));
             farCarrier = new JsonObject { ["export"] = new JsonObject { ["name"] = cell.ExportName(other), ["class"] = cell.ExportClass(other), ["outer"] = cell.ExportName(cell.ExportOuter(other)-1) }, ["sections"] = farNames };
             var bounds = ProcMesh.Bounds(far.SelectMany(s => s.Pos));
             Console.WriteLine($"visuals: far carrier {other}: {far.Count} sections, {far.Sum(s => s.Idx.Count / 3)} triangles, bounds {bounds}");
@@ -872,8 +874,9 @@ internal static class Visuals
             sections = near; mats = nearMats; sectionNames = nearNames; r["sections"] = nearNames;
         }
         var data = ProcMesh.BuildComponent(comp, sections, mats);
+        previewCarriers.Insert(0, new Preview.Carrier($"{cell.ExportName(cell.ExportOuter(e) - 1)}/{cell.ExportName(e)}", sections, mats, sectionNames));
         if (opt.Preview is { } previewDir)
-            r["preview"] = Preview.Write(previewDir, sections, mats, sectionNames, m => imported.First(kv => kv.Value == m).Key, dr2, ir, pl);
+            r["preview"] = Preview.Write(previewDir, previewCarriers, m => imported.FirstOrDefault(kv => kv.Value == m).Key ?? cell.ImportName(-m - 1), dr2, ir, pl);
         r["component"] = $"{cell.ExportName(e)} of {cell.ExportName(cell.ExportOuter(e) - 1)} (export {e})";
 
         if (opt.Retarget)
@@ -2254,4 +2257,6 @@ internal static class Visuals
         Quad(s, a - up, b - up, b + up, a + up, -n);
     }
 }
+
+
 

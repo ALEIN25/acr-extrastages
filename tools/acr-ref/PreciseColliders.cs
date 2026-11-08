@@ -13,8 +13,8 @@ internal static class PreciseColliders
         double bottom = -b.Z/2, top = Math.Min(b.Z/2, points.Min(p=>p.Z)+band);
         int nx=(int)Math.Ceiling(b.X/cell), ny=(int)Math.Ceiling(b.Y/cell);
         if (nx <= 0 || ny <= 0 || (long)nx*ny > 1000000 || top <= bottom) return null;
-        var heights = new double[nx,ny];
-        for(int i=0;i<nx;i++) for(int j=0;j<ny;j++) heights[i,j]=double.NegativeInfinity;
+        var heights = new double[nx,ny]; var lows = new double[nx,ny];
+        for(int i=0;i<nx;i++) for(int j=0;j<ny;j++) { heights[i,j]=double.NegativeInfinity; lows[i,j]=double.PositiveInfinity; }
         double Coord(V3 p,int axis) => axis==0?p.X:axis==1?p.Y:p.Z;
         List<V3> Clip(List<V3> poly,int axis,double edge,bool above)
         {
@@ -37,26 +37,29 @@ internal static class PreciseColliders
             for(int i=ix(poly.Min(p=>p.X));i<=ix(poly.Max(p=>p.X));i++)
             for(int j=iy(poly.Min(p=>p.Y));j<=iy(poly.Max(p=>p.Y));j++) {
                 var q=Clip(Clip(Clip(Clip(poly,0,-b.X/2+i*cell,true),0,Math.Min(b.X/2,-b.X/2+(i+1)*cell),false),1,-b.Y/2+j*cell,true),1,Math.Min(b.Y/2,-b.Y/2+(j+1)*cell),false);
-                if(q.Count>0) heights[i,j]=Math.Max(heights[i,j],q.Max(p=>p.Z));
+                if(q.Count>0) { heights[i,j]=Math.Max(heights[i,j],q.Max(p=>p.Z)); lows[i,j]=Math.Min(lows[i,j],q.Min(p=>p.Z)); }
             }
         }
-        var rectangles=new List<(int a,int end,int row,int last,double high)>();
+        // a cell whose drawn mesh starts well above the box bottom (an arch beam, a mirror, a roof overhang) gets a box from just below its
+        // lowest drawn point, not from the ground: a solid column under an overhang would be an invisible obstacle (the car was pressed into the road)
+        double Low(int i,int j) => lows[i,j] - bottom > 50 ? lows[i,j] - 5 : bottom;
+        var rectangles=new List<(int a,int end,int row,int last,double high,double low)>();
         for(int j=0;j<ny;j++) for(int i=0;i<nx;) {
             if(!double.IsFinite(heights[i,j]) || heights[i,j]<=bottom) {i++;continue;}
             // a run (and a merge across rows) only while the drawn top stays within 15 cm: a box over a bonnet must not take the roof
             // height, or it stands above what is drawn and gets a stand-in again
             const double tol = 15;
-            int a=i; double h=heights[i,j], lo=h;
+            int a=i; double h=heights[i,j], lo=h, b0=Low(i,j);
             while(i<nx && double.IsFinite(heights[i,j]) && heights[i,j]>bottom
-                  && Math.Max(h,heights[i,j]) - Math.Min(lo,heights[i,j]) <= tol) { h=Math.Max(h,heights[i,j]); lo=Math.Min(lo,heights[i,j]); i++; }
-            int k=rectangles.FindIndex(r=>r.a==a && r.end==i && r.last==j-1 && Math.Abs(r.high-h) <= tol);
-            if(k>=0) {var r=rectangles[k]; rectangles[k]=(a,i,r.row,j,Math.Max(h,r.high));}
-            else rectangles.Add((a,i,j,j,h));
+                  && Math.Max(h,heights[i,j]) - Math.Min(lo,heights[i,j]) <= tol && Math.Abs(Low(i,j)-b0) <= 30) { h=Math.Max(h,heights[i,j]); lo=Math.Min(lo,heights[i,j]); b0=Math.Min(b0,Low(i,j)); i++; }
+            int k=rectangles.FindIndex(r=>r.a==a && r.end==i && r.last==j-1 && Math.Abs(r.high-h) <= tol && Math.Abs(r.low-b0) <= 30);
+            if(k>=0) {var r=rectangles[k]; rectangles[k]=(a,i,r.row,j,Math.Max(h,r.high),Math.Min(b0,r.low));}
+            else rectangles.Add((a,i,j,j,h,b0));
         }
         if(rectangles.Count==0 || rectangles.Count>cap) return null;
         return rectangles.Select(r=> {
             double left=-b.X/2+r.a*cell,right=Math.Min(b.X/2,-b.X/2+r.end*cell), front=-b.Y/2+r.row*cell,back=Math.Min(b.Y/2,-b.Y/2+(r.last+1)*cell);
-            var box=new ObjectColliders.Box {Center=b.Center+x*((left+right)/2)+y*((front+back)/2)+z*((bottom+r.high)/2),Rot=(double[])b.Rot.Clone(),X=right-left,Y=back-front,Z=r.high-bottom};
+            var box=new ObjectColliders.Box {Center=b.Center+x*((left+right)/2)+y*((front+back)/2)+z*((r.low+r.high)/2),Rot=(double[])b.Rot.Clone(),X=right-left,Y=back-front,Z=r.high-r.low};
             var s=new ObjectColliders.Shape {Box=box,Kind=shape.Kind,Material=shape.Material,Template=shape.Template,Instance=shape.Instance};
             foreach(double a in new[]{-1.0,1.0}) foreach(double c in new[]{-1.0,1.0}) foreach(double d in new[]{-1.0,1.0}) s.FootprintUe.Add(box.Center+x*(a*box.X/2)+y*(c*box.Y/2)+z*(d*box.Z/2));
             return s;

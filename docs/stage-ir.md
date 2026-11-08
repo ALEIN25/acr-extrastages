@@ -406,3 +406,5 @@ classes.
   - Object origins vs ground: median 0.21 m, p90 1.10 m.
   - Collision vs render bounds: box IoU 0.72 (0.08 with width/length swapped); cylinder 0.57 (0.22 if based at
     the origin).
+
+Ground lighting: --bake-lighting dr2 (default) retains the legacy bake. --bake-lighting none uses unlit detail/layer sources times 2 * colour map, bypassing the pre-shaded low-LOD atlases and all TAmbientOcclusion lightmap multiplication, including decals. The colour-map factor of two is retained: a 0.5 tint is neutral; actual stage averages are not measured. Low-LOD atlases contain baked lighting; none reconstructs from the unlit source instead, which can change their macro colour/detail. Launcher config launcher.toml accepts bake_lighting = "none"; force preparation to replace cached bakes.

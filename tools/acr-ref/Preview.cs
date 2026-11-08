@@ -13,7 +13,9 @@ namespace AcrRef;
 /// streaks before LocalUv), so precision problems show in the preview too.
 internal static class Preview
 {
-    public static JsonObject Write(string dir, IReadOnlyList<ProcMesh.Section> sections, IReadOnlyList<int> mats, JsonArray names,
+    internal record Carrier(string Name, IReadOnlyList<ProcMesh.Section> Sections, IReadOnlyList<int> Materials, JsonArray Names);
+
+    public static JsonObject Write(string dir, IReadOnlyList<Carrier> carriers,
                                    Func<int, string> importPath, Dr2Materials? dr2, StageBuild.Ir ir, StageBuild.Placement pl)
     {
         Directory.CreateDirectory(Path.Combine(dir, "tex"));
@@ -70,6 +72,12 @@ internal static class Preview
         }
 
         long tris = 0;
+        var carrierMetadata = new JsonArray();
+        foreach (var carrier in carriers)
+        {
+        var sections = carrier.Sections; var mats = carrier.Materials; var names = carrier.Names;
+        long carrierTris = 0;
+        var carrierMin = new Vector3(float.MaxValue); var carrierMax = new Vector3(float.MinValue);
         for (int s = 0; s < sections.Count; s++)
         {
             var sec = sections[s];
@@ -90,6 +98,8 @@ internal static class Preview
             var idx = new byte[sec.Idx.Count * 4];
             for (int i = 0; i < sec.Idx.Count; i++) BitConverter.TryWriteBytes(idx.AsSpan(i * 4), sec.Idx[i]);
             tris += sec.Idx.Count / 3;
+            carrierTris += sec.Idx.Count / 3;
+            carrierMin = Vector3.Min(carrierMin, mn); carrierMax = Vector3.Max(carrierMax, mx);
             int ap = Accessor(View(pos, 34962), 5126, n, "VEC3", new JsonArray(mn.X, mn.Y, mn.Z), new JsonArray(mx.X, mx.Y, mx.Z));
             int an = Accessor(View(nrm, 34962), 5126, n, "VEC3");
             int au = Accessor(View(uv, 34962), 5126, n, "VEC2");
@@ -104,6 +114,14 @@ internal static class Preview
                 }),
             });
             nodes.Add(new JsonObject { ["name"] = name, ["mesh"] = meshes.Count - 1 });
+        }
+        carrierMetadata.Add(new JsonObject {
+            ["name"] = carrier.Name, ["triangles"] = carrierTris,
+            ["bounds"] = carrierTris == 0 ? null : new JsonObject {
+                ["min"] = new JsonArray(carrierMin.X, carrierMin.Y, carrierMin.Z),
+                ["max"] = new JsonArray(carrierMax.X, carrierMax.Y, carrierMax.Z)
+            }
+        });
         }
         while (bin.Length % 4 != 0) bw.Write((byte)0);
         var gltf = new JsonObject
@@ -150,6 +168,7 @@ internal static class Preview
         var meta = new JsonObject
         {
             ["stage"] = ir.Dir, ["glb"] = "preview.glb", ["triangles"] = tris, ["sections"] = nodes.Count,
+            ["carriers"] = carrierMetadata,
             ["uv0"] = "rounded to 16-bit floats like the game", ["cameras"] = cams, ["route"] = route, ["markers"] = markers,
         };
         File.WriteAllText(Path.Combine(dir, "preview.json"), meta.ToJsonString(new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));

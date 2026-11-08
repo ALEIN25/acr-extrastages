@@ -142,7 +142,7 @@ internal static class Prepare
             if (needIr)
             {
                 var also = reverse is null ? Array.Empty<string>() : new[] { "--also", reverse };
-                var ir = c.P.Run(exe, new[] { "stage-ir", id, "--render", "--bake-ground", "--out", c.L.IrRoot }.Concat(also).Concat(dr2), log, $"{st.Id}: extracting stage data");
+                var ir = c.P.Run(exe, new[] { "stage-ir", id, "--render", "--bake-ground", "--bake-lighting", c.Cfg.BakeLighting, "--out", c.L.IrRoot }.Concat(also).Concat(dr2), log, $"{st.Id}: extracting stage data");
                 steps.Add("stage-ir");
                 if (ir.Code != 0)
                 {

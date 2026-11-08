@@ -62,6 +62,34 @@ internal sealed class Dr2Materials
     public string Texture(string name, Dds.Fmt fmt, bool linear, int w, int h, IReadOnlyList<byte[]> mips)
     {
         if (_textures.TryGetValue(name, out var known)) return known;
+        // Optional linear-light exposure compensation; data textures must remain untouched.
+        double gain = _cfg["albedo_compensation"].TryGetValue(name, out var setting)
+            ? Convert.ToDouble(setting) : 1;
+        if (!double.IsFinite(gain) || gain <= 0) throw new InvalidDataException("Albedo gain must be finite and positive: " + name);
+        if (!linear && gain != 1)
+        {
+            var adjusted = new List<byte[]>();
+            for (int level = 0; level < mips.Count; level++)
+            {
+                int width = Math.Max(1, w >> level), height = Math.Max(1, h >> level);
+                var pixels = fmt == Dds.Fmt.BC7 ? Preview.DecodeBc7(mips[level], width, height)
+                    : Dds.DecodeBlocks(fmt, mips[level], width, height);
+                for (int i = 0; i < pixels.Length; i += 4)
+                    for (int c = 0; c < 3; c++)
+                    {
+                        double v = pixels[i + c] / 255.0;
+                        v = (v <= .04045 ? v / 12.92 : Math.Pow((v + .055) / 1.055, 2.4)) * gain;
+                        pixels[i + c] = (byte)Math.Clamp(Math.Round(255 * (v <= .0031308 ? 12.92 * v : 1.055 * Math.Pow(v, 1 / 2.4) - .055)), 0, 255);
+                    }
+                var encoder = new BCnEncoder.Encoder.BcEncoder(fmt == Dds.Fmt.BC1
+                    ? BCnEncoder.Shared.CompressionFormat.Bc1 : BCnEncoder.Shared.CompressionFormat.Bc3);
+                encoder.OutputOptions.GenerateMipMaps = false;
+                adjusted.Add(encoder.EncodeToRawBytes(pixels, width, height, BCnEncoder.Encoder.PixelFormat.Rgba32)[0]);
+            }
+            mips = adjusted;
+            fmt = fmt == Dds.Fmt.BC1 ? Dds.Fmt.BC1 : Dds.Fmt.BC3;
+            Log.Add($"{name}: linear albedo gain {gain}");
+        }
         int first = 0;
         while (first < mips.Count - 1 && Math.Max(w >> first, h >> first) > _maxSize) first++;
         int mw = Math.Max(1, w >> first), mh = Math.Max(1, h >> first);
@@ -292,7 +320,7 @@ internal sealed class Dr2Materials
 
     /// A DR2 normal map (DDS in the stage textures) as a BC5 Texture2D (X in R, Y in G, as UE's normal maps): DXT5 normal
     /// maps that keep X in alpha (R nearly constant) are swizzled; BC7 / BC1 / BC3 are decoded and re-encoded. Null if absent.
-    public string? NormalTexture(string ddsName, int maxSize = 0)
+    public string? NormalTexture(string ddsName, int maxSize = 0, bool breakRepeat = false)
     {
         var p = Path.Combine(_texDir, ddsName + ".dds");
         if (!File.Exists(p)) return null;
@@ -303,7 +331,7 @@ internal sealed class Dr2Materials
         int m = Enumerable.Range(0, d.Mips.Count).First(i => Math.Max(d.MipWidth(i), d.MipHeight(i)) <= limit || i == d.Mips.Count - 1);
         int w = d.MipWidth(m), h = d.MipHeight(m);
         bool xInAlpha = false;
-        var mips = Cached($"bc5|{ddsName}|{limit}", p, () =>
+        var mips = Cached($"bc5|{ddsName}|{limit}|{breakRepeat}", p, () =>
         {
             // decoding is as slow as encoding for BC7 sources: both only on a cache miss
             var px = d.Format == Dds.Fmt.BC7 ? Preview.DecodeBc7(d.Mips[m], w, h) : d.Decode(m)!;
@@ -312,6 +340,20 @@ internal sealed class Dr2Materials
             xInAlpha = d.Format == Dds.Fmt.BC3 && Var(3) > 4 * Var(0);
             var rg = new byte[n * 4];
             for (int i = 0; i < n; i++) { rg[i * 4] = xInAlpha ? px[i * 4 + 3] : px[i * 4]; rg[i * 4 + 1] = px[i * 4 + 1]; rg[i * 4 + 3] = 255; }
+            if (breakRepeat)
+            {
+                // Blend a second periodic, rotated sample; rotate its XY vector too.
+                var source = (byte[])rg.Clone();
+                for (int y = 0; y < h; y++) for (int x = 0; x < w; x++)
+                {
+                    int a = (y * w + x) * 4;
+                    int sx = (y * w / h + w / 3) % w;
+                    int sy = (h - 1 - x * h / w + h / 5) % h;
+                    int b = (sy * w + sx) * 4;
+                    rg[a] = (byte)Math.Clamp(128 + .7 * (source[a] - 128) - .3 * (source[b + 1] - 128), 0, 255);
+                    rg[a + 1] = (byte)Math.Clamp(128 + .7 * (source[a + 1] - 128) + .3 * (source[b] - 128), 0, 255);
+                }
+            }
             var enc = new BCnEncoder.Encoder.BcEncoder(BCnEncoder.Shared.CompressionFormat.Bc5);
             enc.OutputOptions.GenerateMipMaps = true;
             enc.OutputOptions.Quality = BCnEncoder.Encoder.CompressionQuality.Fast;
@@ -830,3 +872,4 @@ internal static class DropIn
         return 0;
     }
 }
+

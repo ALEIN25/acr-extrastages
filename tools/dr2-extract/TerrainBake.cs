@@ -25,9 +25,9 @@ internal sealed record GroundBakeOptions(
     double BudgetMb,
     bool ExcludeRoad,
     bool Decals,
-    string UvMode)
+    string UvMode, string Lighting)
 {
-    public static GroundBakeOptions Parse(string[] args, float corridor) => new(
+    private static string LightingMode(string[] args) { var v = Program.Option(args, "--bake-lighting") ?? "dr2"; return v is "none" or "dr2" ? v : throw new ArgumentException("--bake-lighting must be none or dr2"); } public static GroundBakeOptions Parse(string[] args, float corridor) => new(
         double.Parse(Program.Option(args, "--bake-high-res") ?? "0.05", CultureInfo.InvariantCulture),
         double.Parse(Program.Option(args, "--bake-low-res") ?? "0.5", CultureInfo.InvariantCulture),
         // 1024 px tiles in a 25 m corridor: ~8 cm/px next to the road within 200 MB (2048 px tiles over 200 m gave ~20 cm/px in 150 MB)
@@ -37,7 +37,7 @@ internal sealed record GroundBakeOptions(
         double.Parse(Program.Option(args, "--bake-budget-mb") ?? "200", CultureInfo.InvariantCulture),
         args.Contains("--bake-exclude-road"),
         !args.Contains("--bake-no-decals"),
-        Program.Option(args, "--bake-uv") ?? "A");
+        Program.Option(args, "--bake-uv") ?? "A", LightingMode(args));
 }
 
 /// <summary>
@@ -623,7 +623,7 @@ internal static class TerrainBake
                           "bounds extend assign_bounds by a margin so neighbouring triangles stay inside the texture.",
             format = "BC1 (DXT1) DDS, sRGB colour, full mip chain",
             formula = "colour = layered_height_blend(layer a, b, c) * 2 * colour_map * 2 * lightmap, then decals (alpha) * 2 * lightmap; see docs/dr2-formats.md",
-            uv_mode = o.UvMode,
+            lighting = o.Lighting, uv_mode = o.UvMode,
             road = new
             {
                 excluded = o.ExcludeRoad,
@@ -1047,7 +1047,7 @@ internal static class TerrainBake
             var metric = t.M0 * w0 + t.M1 * w1 + t.M2 * w2;
             var wt = t.W0 * w0 + t.W1 * w1 + t.W2 * w2;
             var maps = layerMaps[t.Shader];
-            var low = lowLods[t.Shader];
+            var low = o.Lighting == "dr2" ? lowLods[t.Shader] : null;
             Vector3 At(BakeTextureImage? tex, Vector2 uv, float atlasScale)
             {
                 if (tex is null) return Vector3.One * 0.5f;
@@ -1094,7 +1094,7 @@ internal static class TerrainBake
 
             var colour = detail;
             if (colourMaps[t.Shader] is { } cm) colour *= 2 * At(cm, atlas, t.AtlasPerMetre);
-            if (lightmaps[t.Shader] is { } lm) colour *= 2 * At(lm, atlas, t.AtlasPerMetre);
+            if (o.Lighting == "dr2" && lightmaps[t.Shader] is { } lm) colour *= 2 * At(lm, atlas, t.AtlasPerMetre);
             return (colour, road);
         }
 
@@ -1177,7 +1177,7 @@ internal static class TerrainBake
 
             // DR2's own low-LOD texture on the same section atlas, when there is one: large-scale colour from it, the array
             // layers only add what is finer (as in ShadeLayered)
-            if (lowLods[t.Shader] is { } low && Debug != "nolow" && !InGutter(low, atlas))
+            if (o.Lighting == "dr2" && lowLods[t.Shader] is { } low && Debug != "nolow" && !InGutter(low, atlas))
             {
                 Vector3 mean = default;
                 for (var l = 0; l < 3; l++)
@@ -1203,7 +1203,7 @@ internal static class TerrainBake
             }
 
             var lm = lightmaps[t.Shader];
-            if (lm is not null)
+            if (o.Lighting == "dr2" && lm is not null)
             {
                 var level = MathF.Log2(MathF.Max(1, lm.Width * t.AtlasPerMetre * res));
                 var s = lm.Sample(atlas, level, false);
@@ -1225,7 +1225,7 @@ internal static class TerrainBake
             var level = MathF.Log2(MathF.Max(1, tex.Width * d.UvPerMetre * res));
             var c = tex.Sample(uv, level, true);
             var colour = new Vector3(c.X, c.Y, c.Z);
-            if (d.Lightmap >= 0 && decalLightmaps[d.Lightmap] is { } lm)
+            if (o.Lighting == "dr2" && d.Lightmap >= 0 && decalLightmaps[d.Lightmap] is { } lm)
             {
                 var s = lm.Sample(d.A0 * w0 + d.A1 * w1 + d.A2 * w2, 2, false);
                 colour *= 2 * new Vector3(s.X, s.Y, s.Z);

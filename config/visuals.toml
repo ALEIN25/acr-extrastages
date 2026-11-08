@@ -31,6 +31,7 @@ enclosed_interior = 1
 enclosed_min_coverage = 0.7   # share of a fitted box outline (at two of five heights 0.5-2.5 m) that the object's own drawn surfaces must cover or shield before its stand-in is dropped (cars: wheel arches, porches); InvisibleCheck still checks independently
 fit_colliders_to_mesh = 1
 overhead_templates = "startfinish|lazerstart|lazerfinish|brand_arch"   # regex: start / finish arches and timing gantries that span the road by design: drawn with their DR2 mesh, minus the triangles inside the road corridor at car height
+overhead_passable_above_m = 2.0   # overhead structures: their colliders over the road whose lowest point is this high above the centreline are left out (the car can fly into DR2's boxy arch colliders over crests; drawn and passable is never an invisible obstacle)
 fit_colliders_max_cm = 100
 # only used when stage-build also gets --objects (v1.3): the solid DR2 objects (the colliders written to BakedData)
 enabled = 1
@@ -232,10 +233,11 @@ masked_min_transparent = 0.05                    # share of texels with alpha < 
 ground_detail_m = 1.5                             # one detail-normal repeat every this many metres
 ground_detail_strength = 1.5
 # round 1: the road bake tiles (their own detail scale, strength and ORM; the terrain keeps ground_detail_*)
-road_detail_m = 0.75
+road_detail_mode = "blended" # legacy: original single sample; blended: rotated second sample
+road_detail_m = 2.5
 # The paired road normal is a full road layer on DR2 road-aligned UVs, not a micro-detail.
 # Disable its world-planar repetition over the baked road; opt in with a nonzero strength.
-road_detail_strength = 2.0
+road_detail_strength = 1.0
 road_orm = [255, 178, 0]        # occlusion 1, roughness 0.7, metal 0
 max_size = 2048                 # mips larger than this are dropped
 # DR2's terrain colour maps (nz_01_a_0x_d, section_b) are grey-centred tints over a 17-slice detail array blended per
@@ -297,3 +299,7 @@ collider_gap_limit_cm = 25   # build check: collider and real trunk at 0.3 / 1.0
 [stage]
 finish_runout_m = 60
 
+
+# Exact texture names as logged by Dr2Materials; linear RGB gain, 1 = unchanged.
+# Opt-in experiment: set a selected baked tile to 1.5, then compare shaded banks.
+[albedo_compensation]
