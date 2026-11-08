@@ -63,6 +63,8 @@ function setCam(i) {
   document.querySelectorAll('#cams button').forEach((b, k) => b.classList.toggle('on', k === i));
 }
 window.setCam = setCam;
+// free camera for scripted checks: eye and target in preview metres ([x, y up, z]); returns the route data for orientation
+window.view = (eye, target) => { camera.position.set(...eye); controls.target.set(...target); controls.update(); return true; };
 // top view over camera spot i at height h (metres); holes: magenta sky so gaps in the ground stand out
 window.topView = (i = 0, h = 250) => { const s = meta.cameras[i]; camera.position.set(s.target[0], h, s.target[2] + 0.01); controls.target.set(s.target[0], 0, s.target[2]); controls.update(); };
 window.holes = on => { const c = on ? 0xff00ff : 0x9fc3e6; scene.background.set(c); scene.fog.color.set(c); scene.fog.far = on ? 1e7 : 3000; };
@@ -86,7 +88,27 @@ async function load(id) {
   model = gltf.scene;
   model.traverse(o => { if (o.isMesh) { const m = o.material; if (m.map) { m.map.wrapS = m.map.wrapT = THREE.RepeatWrapping; m.map.anisotropy = 8; } } });
   scene.add(model);
+  // Parent the diagnostics to the model so switching stages also removes them.
+  const overlay = new THREE.Group();
+  model.add(overlay);
+  if (meta.route?.length > 1) {
+    const points = meta.route.map(p => new THREE.Vector3(p[0], p[1] + 0.15, p[2]));
+    overlay.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(points), new THREE.LineBasicMaterial({ color: 0x00ffff, depthTest: false })));
+  }
+  (meta.markers || []).forEach((marker, i) => {
+    const color = [0x44ff44, 0xff4444, 0xffcc00, 0x4488ff][i % 4];
+    const pole = new THREE.Mesh(new THREE.BoxGeometry(0.2, 6, 0.2), new THREE.MeshBasicMaterial({ color, depthTest: false }));
+    pole.position.set(marker.pos[0], marker.pos[1] + 3, marker.pos[2]);
+    overlay.add(pole);
+    const canvas = document.createElement('canvas'); canvas.width = 512; canvas.height = 64;
+    const ctx = canvas.getContext('2d'); ctx.fillStyle = '#000b'; ctx.fillRect(0, 0, 512, 64);
+    ctx.fillStyle = '#' + color.toString(16).padStart(6, '0'); ctx.font = '32px sans-serif'; ctx.fillText(marker.name, 8, 44);
+    const label = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(canvas), depthTest: false }));
+    label.position.copy(pole.position).add(new THREE.Vector3(0, 4, 0)); label.scale.set(12, 1.5, 1); overlay.add(label);
+  });
   const cams = document.getElementById('cams'); cams.innerHTML = '';
+  const diagnostics = document.createElement('button'); diagnostics.textContent = 'route / markers';
+  diagnostics.onclick = () => { overlay.visible = !overlay.visible; }; cams.appendChild(diagnostics);
   meta.cameras.forEach((c, i) => { const b = document.createElement('button'); b.textContent = c.name; b.onclick = () => setCam(i); cams.appendChild(b); });
   const top = document.createElement('button'); top.textContent = 'top view';
   top.onclick = () => topView(0, 600);

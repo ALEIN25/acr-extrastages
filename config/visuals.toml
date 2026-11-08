@@ -281,3 +281,6 @@ chunk_m = 200            # one component per template per chunk_m x chunk_m cell
 billboard = 1            # a far LOD: DR2 own billboard strip as two crossed cards (MaskedMic), when the template has one
 billboard_screen_size = 0.2   # the billboard LOD is used below this screen size
 collider_gap_limit_cm = 25   # build check: collider and real trunk at 0.3 / 1.0 m (both ways) and 2.0 m (collider beyond trunk) above the base of every instanced tree within 12 m of the road, at most this far apart; trees the fit lists (kept DR2 capsule, or fitted but still over: multi-stem or forked) are exempt
+
+[stage]
+finish_runout_m = 60

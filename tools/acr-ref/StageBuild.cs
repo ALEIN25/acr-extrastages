@@ -69,6 +69,9 @@ internal static class StageBuild
         public double[] CollisionMin = [], CollisionMax = [];
         public long CollisionTriangles;
         public string Dir = "";
+        public double Runout = 60;
+        public List<V3>? PreviewRoute;
+        public Dictionary<string,V3> PreviewMarkers = new();
 
         public static Ir Load(string dir)
         {
@@ -136,8 +139,12 @@ internal static class StageBuild
     static string Need(Options o, string k) => o.Named.TryGetValue(k, out var v) ? v : throw new ArgumentException($"--{k} is required");
     static string F(double v, string fmt = "0.###") => v.ToString(fmt, CultureInfo.InvariantCulture);
 
+    // config/visuals.toml for helpers without options (finish extension): the --visuals path of this run
+    internal static string VisualsToml = Path.Combine("config", "visuals.toml");
+
     public static int Run(Options o)
     {
+        if (o.Named.GetValueOrDefault("visuals") is { Length: > 0 } vt) VisualsToml = vt;
         var ir = Ir.Load(Need(o, "ir"));
         // the reverse route of the same road, built into the host's reverse variant (gameplay cell 7FF9 + reverse pacenote table)
         var rev = o.Named.GetValueOrDefault("reverse-ir") is { } revDir ? Ir.Load(revDir) : null;
@@ -192,6 +199,9 @@ internal static class StageBuild
             if (vo.GroundBake is not null) report["options"]!["visuals_ground_bake"] = vo.GroundBake;
             if (vo.InstancingLegacy is not null) report["options"]!["instancing_legacy"] = vo.InstancingLegacy;
         }
+        var finishConfig = o.Named.GetValueOrDefault("visuals") is { } vc ? Toml.Load(vc) : null;
+        ir.Runout = finishConfig is not null && finishConfig["stage"].TryGetValue("finish_runout_m", out var value) ? Convert.ToDouble(value) : 60;
+        if (rev is not null) rev.Runout = ir.Runout;
         var road = Road(ir, pl);
 
         // Kunos' track physics only knows the surfaces listed in DA_PhysMaterialsMappingCommon; a collider whose physical
@@ -258,8 +268,14 @@ internal static class StageBuild
         return new RoadProbe(Road(ir, pl), surf, cfg, RoadSurfaces.For(cfg.Arr("road", "surfaces"), surf, ir.Centre.Select(pl.ToUe).ToList()));
     }
 
-    internal static RoadCorridor Road(Ir ir, Placement pl) =>
-        new(ir.Centre.Select(pl.ToUe).ToList(), ir.Gates.Select(g => pl.ToUe(g.left)).ToList(), ir.Gates.Select(g => pl.ToUe(g.right)).ToList());
+    internal static RoadCorridor Road(Ir ir, Placement pl)
+    {
+        var c = ir.Centre.Select(pl.ToUe).ToList();
+        var l = ir.Gates.Select(g => pl.ToUe(g.left)).ToList();
+        var r = ir.Gates.Select(g => pl.ToUe(g.right)).ToList();
+        ExtendFinishRoad(ir, pl, c, l, r);
+        return new(c, l, r);
+    }
 
     static bool InPhysicsBounds(V3 p) => p.X >= PhysMinX && p.X <= PhysMaxX && p.Z >= PhysMinZ && p.Z <= PhysMaxZ;
 
@@ -668,6 +684,7 @@ internal static class StageBuild
         var centre = ir.Centre.Select(pl.ToUe).ToList();
         var left = ir.Gates.Select(g => pl.ToUe(g.left)).ToList();
         var right = ir.Gates.Select(g => pl.ToUe(g.right)).ToList();
+        ExtendFinishRoad(ir, pl, centre, left, right);
         var contour = new List<V3>();
         V3 Push(V3 edge, V3 c)
         {
@@ -732,9 +749,17 @@ internal static class StageBuild
 
         double hostStart = hostLine.Project(Loc(objs[sectors[0]])).s, hostFinish = hostLine.Project(Loc(objs[sectors[3]])).s;
         double hostEnd = hostLine.Project(Loc(objs[endTrigger])).s;
-        double newEnd = SGate(finish.gate) + (hostEnd - hostFinish);
+        double finishS = FinishArch(ir, pl, newLine, SGate(finish.gate));
+        var finishCfg = o.Named.GetValueOrDefault("visuals") is { } fc ? Toml.Load(fc) : null;
+        double runout = ir.Runout;
+        double newEnd = finishS + runout * 100;
+        if (newEnd > newLine.Length) throw new InvalidDataException("Finish runout exceeds extended road");
         var dr2Stop = ir.Triggers.FirstOrDefault(t => t.type == "VehicleBox" && t.name.StartsWith("EndSequenceTrigger", StringComparison.OrdinalIgnoreCase));
-        if (dr2Stop.position is not null) newEnd = newLine.Project(pl.ToUe(dr2Stop.position)).s;
+        
+        ir.PreviewRoute = centre;
+        ir.PreviewMarkers["finish"] = newLine.At(finishS, 0, 0, out _);
+        ir.PreviewMarkers["end trigger"] = newLine.At(newEnd, 0, 0, out _);
+        ir.PreviewMarkers["DR2 flying finish"] = pl.ToUe(ir.Gates[finish.gate].crossing);
         double minS = 500, maxS = newLine.Length - 1500;
 
         // where DR2 starts the clock at (or near) its first gate, the line moves on so the car still gets its 12 m run-up
@@ -748,14 +773,14 @@ internal static class StageBuild
             ("RaceSector0 (start line)", sectors[0], lineS),
             ($"RaceSector1 (split, DR2 gate {splitA})", sectors[1], SGate(splitA)),
             ($"RaceSector2 (split, DR2 gate {splitB})", sectors[2], SGate(splitB)),
-            ($"RaceSector3 (finish, DR2 gate {finish.gate})", sectors[3], SGate(finish.gate)),
+            ($"RaceSector3 (finish, DR2 gate {finish.gate})", sectors[3], finishS),
             ("EndSequenceTrigger (stop zone)", endTrigger, newEnd),
             ("PostRaceCamera", postCam, newEnd + hostLine.Project(Loc(objs[postCam])).s - hostEnd),
         };
         var actors = new JsonArray();
         foreach (var (role, comp, s0) in plan)
         {
-            double s = Math.Clamp(s0, minS, maxS);
+            double s = comp == sectors[3] || comp == endTrigger ? s0 : Math.Clamp(s0, minS, maxS);
             var obj = objs[comp];
             var hostLoc = Loc(obj);
             var (_, lat, upOff, hHead) = hostLine.Project(hostLoc);
@@ -804,7 +829,7 @@ internal static class StageBuild
         foreach (var a in actors) Console.WriteLine($"  {a}");
         cell.SaveTo(Path.Combine(outRoot, dir.Cell + Path.GetExtension(path)));
 
-        double sm(double cm) => Math.Clamp(cm, minS, maxS) / 100;
+
         double PolyToSpline(double polyCm)
         {
             int i = Array.BinarySearch(newLine.S, polyCm);
@@ -813,7 +838,78 @@ internal static class StageBuild
             double u = (polyCm - newLine.S[i]) / Math.Max(1e-9, newLine.S[i + 1] - newLine.S[i]);
             return gateS[i] + u * (gateS[i + 1] - gateS[i]);
         }
-        return new CellInfo(gateS, centre, PolyToSpline(lineS),PolyToSpline(SGate(finish.gate)), PolyToSpline(sm(newEnd) * 100));
+        return new CellInfo(gateS, centre, PolyToSpline(lineS),PolyToSpline(finishS), PolyToSpline(newEnd));
+    }
+
+    // Select the first marked stop-control arch after the authored flying finish.
+    static double FinishArch(Ir ir, Placement pl, Polyline line, double flying)
+    {
+        var objects = JsonNode.Parse(File.ReadAllText(Path.Combine(ir.Dir, "stage.json")))!["objects"];
+        var candidates = new List<(double s, V3 p)>();
+        foreach (var inst in objects?["instances"]?.AsArray() ?? [])
+        {
+            if (!inst!["template"]!.GetValue<string>().Contains("startfinish", StringComparison.OrdinalIgnoreCase)) continue;
+            var pos = Vector3.Transform(Vector3.Zero, ObjectColliders.Trs(inst["transform"]));
+            var point = pl.ToUe([pos.X, pos.Y, pos.Z]);
+            var projection = line.Project(point);
+            if (projection.s >= flying && projection.s <= flying + 40000) candidates.Add((projection.s, point));
+        }
+        if (candidates.Count == 0) return flying;
+        var nearest = candidates.MinBy(c => c.s);
+        ir.PreviewMarkers["DR2 arch"] = nearest.p;
+        return (line.At(nearest.s, 0, 0, out _) - nearest.p).Length <= 600 ? nearest.s : flying;
+    }
+
+    // Follow transverse slices of the actual collision road, preserving every authored gate.
+    static void ExtendFinishRoad(Ir ir, Placement pl, List<V3> centre, List<V3> left, List<V3> right)
+    {
+        var surface = new SurfaceGrid(Path.Combine(ir.Dir, "collision.glb"), pl);
+        var cfg = Toml.Load(VisualsToml);
+        var materials = RoadSurfaces.For(cfg.Arr("road", "surfaces"), surface, centre);
+        materials.UnionWith(cfg.Arr("road", "surfaces").Cast<string>());
+        foreach (var q in centre) if (surface.At(q.X / 100, q.Y / 100) is { } code) materials.Add(code);
+        var stop = ir.Triggers.FirstOrDefault(t => t.type == "VehicleBox" && t.name.StartsWith("EndSequenceTrigger", StringComparison.OrdinalIgnoreCase));
+        var origin = centre[^1];
+        double target = 40000 + ir.Runout * 100 + 3000;
+        double distance = 0;
+        while (distance < target)
+        {
+            var p = centre[^1]; var d = p - centre[^2];
+            double norm = Math.Sqrt(d.X * d.X + d.Y * d.Y);
+            var forward = new V3(d.X / norm, d.Y / norm, 0);
+            var side = new V3(-forward.Y, forward.X, 0);
+            var probe = p + forward * 200;
+            bool Road(double offset)
+            {
+                var q = probe + side * offset;
+                return surface.At(q.X / 100, q.Y / 100) is { } m && materials.Contains(m)
+                    && surface.HeightAt(q.X / 100, q.Y / 100) is { } h && Math.Abs(h * 100 - p.Z) < 300;
+            }
+            double seed = Enumerable.Range(-20, 41).Select(i => i * 25.0).OrderBy(Math.Abs).FirstOrDefault(Road, double.NaN);
+            // the road may end before the wished-for length (Finland 01 route 5: 407 m): enough once DR2's stop trigger + 30 m is covered
+            if (double.IsNaN(seed)) { Console.WriteLine($"finish extension stopped at {distance / 100:0.0} m: no road surface within search/height tolerance"); break; }
+            double lo = seed, hi = seed;
+            while (lo > -2000 && Road(lo - 25)) lo -= 25;
+            while (hi < 2000 && Road(hi + 25)) hi += 25;
+            if (lo <= -2000 || hi >= 2000) throw new InvalidDataException("Unbounded finish road surface slice");
+            var next = probe + side * ((lo + hi) / 2);
+            next = new V3(next.X, next.Y, surface.HeightAt(next.X / 100, next.Y / 100)!.Value * 100);
+            if (surface.At(next.X / 100, next.Y / 100) is not { } drawn || !materials.Contains(drawn)) { Console.WriteLine($"finish extension stopped at {distance / 100:0.0} m: midpoint outside road"); break; }
+            distance += (next - p).Length;
+            centre.Add(next);
+            double sign = (left[^1] - p).X * side.X + (left[^1] - p).Y * side.Y;
+            left.Add(new V3(probe.X + side.X * (sign > 0 ? hi : lo), probe.Y + side.Y * (sign > 0 ? hi : lo), next.Z));
+            right.Add(new V3(probe.X + side.X * (sign > 0 ? lo : hi), probe.Y + side.Y * (sign > 0 ? lo : hi), next.Z));
+            var line = new Polyline(centre);
+            double flying = line.S[ir.Gates.Count - 1];
+            double finish = FinishArch(ir, pl, line, flying);
+            if (ir.PreviewMarkers.TryGetValue("DR2 arch", out var arch))
+            {
+                target = (arch - origin).Length + ir.Runout * 100 + 3000;
+                if ((line.At(finish, 0, 0, out _) - arch).Length <= 600 && distance >= target) break;
+            }
+        }
+        Console.WriteLine($"finish extension length {distance / 100:0.0} m; target {target / 100:0.0} m");
     }
 
     static double NormDeg(double d) { d %= 360; return d > 180 ? d - 360 : d <= -180 ? d + 360 : d; }
@@ -1097,7 +1193,13 @@ internal static class StageBuild
         double len = cs.Reparam.Points[^1].InVal / 100;
         double polyLen = 0;
         for (int i = 1; i < ir.Centre.Count; i++) polyLen += (pl.ToPhysics(ir.Centre[i]) - pl.ToPhysics(ir.Centre[i - 1])).Length;
-        C(cs.Position.Points.Count == ir.Centre.Count && Math.Abs(len - polyLen) < polyLen * 0.01,
+        double routeLen = new Polyline(cs.Position.Points.Take(ir.Centre.Count).Select(p => V3.From(p.Out)).ToList()).Length / 100;
+        var extension = cs.Position.Points.Skip(ir.Centre.Count).Select(p => V3.From(p.Out)).ToList();
+        var drawnSurface = new SurfaceGrid(Path.Combine(ir.Dir,"collision.glb"),pl);
+        var drawnCodes = RoadSurfaces.For(Toml.Load(VisualsToml).Arr("road","surfaces"),drawnSurface,ir.Centre.Select(pl.ToUe).ToList());
+        double worst = extension.Any(p => drawnSurface.At(p.X/100,p.Y/100) is not { } m || !drawnCodes.Contains(m)) ? double.PositiveInfinity : 0;
+        C(worst <= 2, $"extension worst offset from drawn road: {worst} m (limit 2 m)");
+        C(cs.Position.Points.Count > ir.Centre.Count && len >= polyLen && Math.Abs(routeLen - polyLen) < polyLen * 0.01,
             $"CenterSpline: {cs.Position.Points.Count} points, length {len:0.#} m (DR2 centreline polyline {polyLen:0.#} m)");
         var first = pl.ToUe(ir.Centre[0]);
         C((V3.From(cs.Position.Points[0].Out) - first).Length < 1, "CenterSpline starts at the DR2 run-up (first gate) and runs in driving order");

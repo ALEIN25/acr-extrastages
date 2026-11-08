@@ -137,11 +137,20 @@ internal static class Preview
         Cam("start", startIdx);
         foreach (var f in new[] { 0.25, 0.5, 0.75 }) Cam($"{f:P0} of the stage", (int)(startIdx + (finishIdx - startIdx) * f));
         Cam("before the finish", finishIdx - 6);
-        var route = new JsonArray(ir.Gates.Where((_, i) => i % 4 == 0).Select(g => { var p = Td(pl.ToUe(g.crossing)); return (JsonNode)new JsonArray(Math.Round(p.X, 1), Math.Round(p.Y, 1), Math.Round(p.Z, 1)); }).ToArray());
+        var route = new JsonArray((ir.PreviewRoute ?? ir.Centre.Select(pl.ToUe).ToList()).Select(g => { var p = Td(g); return (JsonNode)new JsonArray(Math.Round(p.X, 1), Math.Round(p.Y, 1), Math.Round(p.Z, 1)); }).ToArray());
+        var markers = new JsonArray();
+        foreach (var item in ir.PreviewMarkers) { var q = Td(item.Value); markers.Add(new JsonObject { ["name"] = item.Key, ["pos"] = new JsonArray(q.X,q.Y,q.Z) }); }
+        if (ir.PreviewMarkers.TryGetValue("finish", out var finish)) {
+            var q = Td(finish); var path = ir.PreviewRoute!;
+            int i = Enumerable.Range(0,path.Count).MinBy(i => (path[i]-finish).Length);
+            var d = Vector3.Normalize(q-Td(path[Math.Max(0,i-1)]));
+            foreach (var item in new[] { ("finish",q-d*25+new Vector3(0,3,0)), ("finish top",q+new Vector3(0,100,0.1f)) })
+                cams.Add(new JsonObject { ["name"]=item.Item1,["eye"]=new JsonArray(item.Item2.X,item.Item2.Y,item.Item2.Z),["target"]=new JsonArray(q.X,q.Y,q.Z) });
+        }
         var meta = new JsonObject
         {
             ["stage"] = ir.Dir, ["glb"] = "preview.glb", ["triangles"] = tris, ["sections"] = nodes.Count,
-            ["uv0"] = "rounded to 16-bit floats like the game", ["cameras"] = cams, ["route"] = route,
+            ["uv0"] = "rounded to 16-bit floats like the game", ["cameras"] = cams, ["route"] = route, ["markers"] = markers,
         };
         File.WriteAllText(Path.Combine(dir, "preview.json"), meta.ToJsonString(new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
         Console.WriteLine($"preview: {dir}\\preview.glb, {nodes.Count} sections, {tris} triangles, {images.Count} textures, {new FileInfo(Path.Combine(dir, "preview.glb")).Length / 1e6:0} MB");
