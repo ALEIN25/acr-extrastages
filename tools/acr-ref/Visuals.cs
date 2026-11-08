@@ -39,7 +39,7 @@ internal static class Visuals
     internal sealed record Options(string Host, bool Retarget, string? Owner, string Vegetation = "none", string? Canopies = null,
                                    bool Vista = false, bool Textured = false, bool Dr2 = false, string Dr2Revert = "",
                                    string TerrainUv = "planar", string Ground = "collision", bool GroundLod = false, string? GroundBake = null,
-                                   string? Preview = null, bool RoadBake = false, string? InstancingLegacy = null)
+                                   string? Preview = null, bool RoadBake = false, string? InstancingLegacy = null, bool PreviewNormalMaps = false)
     {
         public static Options From(IReadOnlyDictionary<string, string> named) => new(
             named.GetValueOrDefault("visuals-host", "start"),
@@ -57,7 +57,8 @@ internal static class Visuals
             named.GetValueOrDefault("visuals-ground-bake") is { Length: > 0 } gb ? gb : null,
             named.GetValueOrDefault("visuals-preview") is { Length: > 0 } pv ? pv : null,
             named.GetValueOrDefault("visuals-road-bake", "0") != "0",
-            named.GetValueOrDefault("instancing-legacy") is { Length: > 0 } il ? il : null);
+            named.GetValueOrDefault("instancing-legacy") is { Length: > 0 } il ? il : null,
+            named.GetValueOrDefault("visuals-preview-normal-maps", "0") != "0");
 
         public static readonly string[] Dr2Sections = ["terrain", "road", "vista", "objects"];
 
@@ -626,7 +627,7 @@ internal static class Visuals
                 treeBase is not null && instancingPlan!.Species.ContainsKey(s.Template) && treeBase.TryGetValue(s.Instance, out var bz) && VisualObjects.TrunkClipZ(s, carClip, bz) is { } cz
                     ? VisualObjects.ClipTris(tris, (float)cz).ToList() : tris;
             var colliders = (objects?.Kept ?? []).Select(s => (s, tris: CarHeight(s, InvisibleCheck.ColliderTriangles(s)), hull: new bool[1], lid: new bool[1])).Where(x => x.tris.Count > 0).ToList();
-            int proxyShapes = 0, proxyTris = 0, proxyLids = 0;
+            int proxyShapes = 0, proxyTris = 0, proxyLids = 0, trunksUnclipped = 0;
             Console.WriteLine($"visuals: proxies skipped for enclosed fitted colliders: {colliders.Count(x => x.s.EnclosedFittedInterior)}");
             double cellCm = inv.CellM * 100, cellArea = inv.CellM * inv.CellM;
             int minCells = Math.Max(1, (int)Math.Ceiling(inv.MinAreaM2 / cellArea));
@@ -710,6 +711,15 @@ internal static class Visuals
                     foreach (var (a, b, c) in drawTris) Both(a, b, c);
                     flagged = Flagged(tris);
                     if (flagged.Count < minCells) continue;
+                    // a clipped trunk still uncovered (on a slope the clip height, from the capsule foot, is lower than the car
+                    // band from the uphill ground): the whole trunk instead of flat lid strips floating at the cut
+                    if (!ReferenceEquals(drawTris, tris))
+                    {
+                        foreach (var (a, b, c) in tris) Both(a, b, c);
+                        trunksUnclipped++;
+                        flagged = Flagged(tris);
+                        if (flagged.Count < minCells) continue;
+                    }
                 }
                 // cells still flagged: the hull above them is overhead. A lid at the clamped physics height, one flat strip per run
                 lid[0] = true;
@@ -755,7 +765,7 @@ internal static class Visuals
                 ["of_instanced_trees"] = instancingPlan is null ? 0 : colliders.Count(x => x.hull[0] && instancingPlan.Species.ContainsKey(x.s.Template)),
                 ["of_instanced_trees_ids"] = new JsonArray((instancingPlan is null ? [] : colliders.Where(x => x.hull[0] && instancingPlan.Species.ContainsKey(x.s.Template)).Select(x => x.s.Instance).Distinct().Order().ToArray()).Select(x => (JsonNode)x).ToArray()),
             };
-            Console.WriteLine($"visuals: colliders_drawn_as_proxy: {proxied} of {colliders.Count} object colliders stood above everything drawn; {proxyTris} triangles ({proxyLids} lid strips)");
+            Console.WriteLine($"visuals: colliders_drawn_as_proxy: {proxied} of {colliders.Count} object colliders stood above everything drawn; {proxyTris} triangles ({proxyLids} lid strips, {trunksUnclipped} trunks drawn whole)");
             // rock surfaces on the stage's main steep-rock slice, the rest on its ground texture
             var rockTex = steepRock is { Count: > 0 } ? steepRock.MaxBy(kv => kv.Value.Idx.Count).Key : null;
             var fr = new JsonObject();
@@ -820,6 +830,12 @@ internal static class Visuals
         if (chunkMode == "") chunkMode = "off";
         if (chunkMode is not ("off" or "two_existing")) throw new ArgumentException("visuals.chunk_mode must be off or two_existing");
         JsonObject? farCarrier = null;
+        var tangentMode = cfg["dr2_textures"].GetValueOrDefault("proc_tangents", "uv");
+        if (tangentMode is not ("uv" or "normal")) throw new InvalidDataException("dr2_textures.proc_tangents must be uv or normal");
+        bool uvTangents = tangentMode is "uv";
+        // Compute before partitioning so shared boundary vertices keep the same shading basis.
+        if (uvTangents && chunkMode == "two_existing")
+            foreach (var section in sections) ProcMesh.EnsureUvTangents(section);
         var previewCarriers = new List<Preview.Carrier>();
         if (chunkMode == "two_existing")
         {
@@ -852,7 +868,7 @@ internal static class Visuals
                         {
                             v = (uint)dst.Pos.Count; maps[side][old] = v; dst.Pos.Add(src.Pos[(int)old]);
                             void Copy<T>(List<T> a, List<T> b) { if (a.Count == src.Pos.Count) b.Add(a[(int)old]); }
-                            Copy(src.Nrm, dst.Nrm); Copy(src.Tan, dst.Tan); Copy(src.Uv, dst.Uv); Copy(src.Uv1, dst.Uv1); Copy(src.Uv2, dst.Uv2); Copy(src.Uv3, dst.Uv3);
+                            Copy(src.Nrm, dst.Nrm); Copy(src.Tan, dst.Tan); Copy(src.FlipTanY, dst.FlipTanY); Copy(src.Uv, dst.Uv); Copy(src.Uv1, dst.Uv1); Copy(src.Uv2, dst.Uv2); Copy(src.Uv3, dst.Uv3);
                         }
                         dst.Idx.Add(v);
                     }
@@ -862,7 +878,7 @@ internal static class Visuals
                 if (halves[0].Idx.Count > 0) { near.Add(halves[0]); nearMats.Add(mats[i]); nearNames.Add(sectionNames[i]!.DeepClone()); }
                 if (halves[1].Idx.Count > 0) { far.Add(halves[1]); farMats.Add(mats[i]); farNames.Add(sectionNames[i]!.DeepClone()); }
             }
-            var farData = ProcMesh.BuildComponent(donor, far, farMats);
+            var farData = ProcMesh.BuildComponent(donor, far, farMats, uvTangents);
             var readback = ProcMesh.Parse(farData, other); cursor = readback.Slots[3].at + 4;
             for (int i = 0; i < nativeCount; i++) { var s = ProcMesh.ReadSection(farData, ref cursor, out _); if (s.Pos.Count != far[i].Pos.Count || s.Idx.Count != far[i].Idx.Count) throw new InvalidDataException("Native ring counts changed"); }
             cell.SetExportData(other, farData);
@@ -873,10 +889,10 @@ internal static class Visuals
             r["chunk_conservation"] = conservation; r["chunk_mode"] = chunkMode;
             sections = near; mats = nearMats; sectionNames = nearNames; r["sections"] = nearNames;
         }
-        var data = ProcMesh.BuildComponent(comp, sections, mats);
+        var data = ProcMesh.BuildComponent(comp, sections, mats, uvTangents);
         previewCarriers.Insert(0, new Preview.Carrier($"{cell.ExportName(cell.ExportOuter(e) - 1)}/{cell.ExportName(e)}", sections, mats, sectionNames));
         if (opt.Preview is { } previewDir)
-            r["preview"] = Preview.Write(previewDir, previewCarriers, m => imported.FirstOrDefault(kv => kv.Value == m).Key ?? cell.ImportName(-m - 1), dr2, ir, pl);
+            r["preview"] = Preview.Write(previewDir, previewCarriers, m => imported.FirstOrDefault(kv => kv.Value == m).Key ?? cell.ImportName(-m - 1), dr2, ir, pl, opt.PreviewNormalMaps, uvTangents);
         r["component"] = $"{cell.ExportName(e)} of {cell.ExportName(cell.ExportOuter(e) - 1)} (export {e})";
 
         if (opt.Retarget)

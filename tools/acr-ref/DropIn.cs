@@ -680,10 +680,16 @@ internal sealed class Dr2Materials
         ProcNormalMaps && PairedNormal(diffuse) is { } n ? NormalTexture(n, (int)_cfg.Num("dr2_textures", "object_normal_max_size")) : null;
 
     /// [dr2_textures] object_normal_maps: DR2 normal maps on the procedural sections (objects, bark, class and rock sections).
-    /// Those sections carry no UV tangents (ProcMesh derives one from the normal alone), so a detailed normal map was lit in
-    /// arbitrary directions: logs, rocks, trunks and rock banks near black in game. false: flat normal, lit by the vertex normals
-    /// as in the offline preview. Terrain and road keep theirs (they have real tangents).
-    public bool ProcNormalMaps => !_cfg["dr2_textures"].TryGetValue("object_normal_maps", out var v) || v is true;
+    /// Leave false until UV tangents and the paired maps have passed an in-game check.
+    public bool ProcNormalMaps => _cfg["dr2_textures"].TryGetValue("object_normal_maps", out var v) && v is true;
+
+    // Bypasses object_normal_maps to inspect maps before enabling them in game.
+    public string? PreviewNormal(string baseTexture)
+    {
+        var diffuse = _textures.FirstOrDefault(kv => kv.Value == baseTexture).Key;
+        return diffuse is not null && PairedNormal(diffuse) is { } n
+            ? NormalTexture(n, (int)_cfg.Num("dr2_textures", "object_normal_max_size")) : null;
+    }
 
     /// Round 3: a tree billboard strip (<template>_lod_d, BC3 cut-out) for the far cards. The colour under the transparent texels
     /// is whatever DR2's atlas left there (dark), which the filtering and mips pull into the leaf edges as a dark fringe: the colour

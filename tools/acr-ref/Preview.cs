@@ -11,12 +11,15 @@ namespace AcrRef;
 /// materials: a flat stand-in colour by name), and <dir>/preview.json with camera spots along the route.
 /// UV0 is rounded to 16-bit floats, which is how the game appears to draw procedural-mesh UVs (inferred from the in-game
 /// streaks before LocalUv), so precision problems show in the preview too.
+/// --visuals-preview-normal-maps 1 adds TANGENT and paired DR2 normalTexture for inspection,
+/// independently of object_normal_maps. The viewer starts with normal maps disabled.
 internal static class Preview
 {
     internal record Carrier(string Name, IReadOnlyList<ProcMesh.Section> Sections, IReadOnlyList<int> Materials, JsonArray Names);
 
     public static JsonObject Write(string dir, IReadOnlyList<Carrier> carriers,
-                                   Func<int, string> importPath, Dr2Materials? dr2, StageBuild.Ir ir, StageBuild.Placement pl)
+                                   Func<int, string> importPath, Dr2Materials? dr2, StageBuild.Ir ir, StageBuild.Placement pl,
+                                   bool normalMaps = false, bool uvTangents = true)
     {
         Directory.CreateDirectory(Path.Combine(dir, "tex"));
         foreach (var old in Directory.GetFiles(Path.Combine(dir, "tex"), "*.png")) File.Delete(old);
@@ -66,6 +69,17 @@ internal static class Preview
                 pbr["baseColorTexture"] = new JsonObject { ["index"] = textures.Count - 1 };
             }
             else pbr["baseColorFactor"] = StandIn(path);
+            if (normalMaps && dr2 is not null && dr2.MicBase.TryGetValue(path, out var baseTex)
+                && dr2.PreviewNormal(baseTex) is { } normal && dr2.TexMip0.TryGetValue(normal, out var nm))
+            {
+                var px = Dds.DecodeBlocks(nm.fmt, nm.mip, nm.w, nm.h);
+                ConvertNormalForGltf(px);
+                var file = $"tex/{normal[(normal.LastIndexOf('/') + 1)..]}_normal.png";
+                if (!File.Exists(Path.Combine(dir, file))) Dds.WritePng(Path.Combine(dir, file), nm.w, nm.h, px);
+                images.Add(new JsonObject { ["uri"] = file });
+                textures.Add(new JsonObject { ["source"] = images.Count - 1 });
+                m["normalTexture"] = new JsonObject { ["index"] = textures.Count - 1 };
+            }
             m["pbrMetallicRoughness"] = pbr;
             materials.Add(m);
             return matIndex[mat] = materials.Count - 1;
@@ -84,6 +98,8 @@ internal static class Preview
             var name = s < names.Count ? names[s]!.GetValue<string>() : $"section{s}";
             if (sec.Idx.Count == 0 || name == "dummy" || name.StartsWith("instancing:keep:")) continue;
             int n = sec.Pos.Count;
+            if (normalMaps && uvTangents) ProcMesh.EnsureUvTangents(sec);
+            var tan = normalMaps ? new byte[n * 16] : null;
             var pos = new byte[n * 12]; var nrm = new byte[n * 12]; var uv = new byte[n * 8];
             var mn = new Vector3(float.MaxValue); var mx = new Vector3(float.MinValue);
             for (int i = 0; i < n; i++)
@@ -91,6 +107,16 @@ internal static class Preview
                 var p = T(sec.Pos[i]); mn = Vector3.Min(mn, p); mx = Vector3.Max(mx, p);
                 // Export final shading normals (including optional crown-spherical foliage), never face-rebuild here.
                 var q = sec.Nrm[i]; var nn = new Vector3(q.X, q.Z, q.Y);
+                if (tan is not null)
+                {
+                    var t = sec.Tan.Count == n ? sec.Tan[i] : ProcMesh.NormalTangent(q);
+                    bool flip = sec.FlipTanY.Count == n && sec.FlipTanY[i];
+                    var tt = GltfTangent(t, flip);
+                    BitConverter.TryWriteBytes(tan.AsSpan(i * 16), tt.X);
+                    BitConverter.TryWriteBytes(tan.AsSpan(i * 16 + 4), tt.Y);
+                    BitConverter.TryWriteBytes(tan.AsSpan(i * 16 + 8), tt.Z);
+                    BitConverter.TryWriteBytes(tan.AsSpan(i * 16 + 12), tt.W);
+                }
                 var u = i < sec.Uv.Count ? sec.Uv[i] : Vector2.Zero;
                 foreach (var (arr, at, vals) in new[] { (pos, i * 12, new[] { p.X, p.Y, p.Z }), (nrm, i * 12, new[] { nn.X, nn.Y, nn.Z }),
                                                         (uv, i * 8, new[] { (float)(Half)u.X, (float)(Half)u.Y }) })
@@ -105,12 +131,14 @@ internal static class Preview
             int an = Accessor(View(nrm, 34962), 5126, n, "VEC3");
             int au = Accessor(View(uv, 34962), 5126, n, "VEC2");
             int ai = Accessor(View(idx, 34963), 5125, sec.Idx.Count, "SCALAR");
+            var attributes = new JsonObject { ["POSITION"] = ap, ["NORMAL"] = an, ["TEXCOORD_0"] = au };
+            if (tan is not null) attributes["TANGENT"] = Accessor(View(tan, 34962), 5126, n, "VEC4");
             meshes.Add(new JsonObject
             {
                 ["name"] = name,
                 ["primitives"] = new JsonArray(new JsonObject
                 {
-                    ["attributes"] = new JsonObject { ["POSITION"] = ap, ["NORMAL"] = an, ["TEXCOORD_0"] = au },
+                    ["attributes"] = attributes,
                     ["indices"] = ai, ["material"] = Material(mats[s]),
                 }),
             });
@@ -169,12 +197,28 @@ internal static class Preview
         var meta = new JsonObject
         {
             ["stage"] = ir.Dir, ["glb"] = "preview.glb", ["triangles"] = tris, ["sections"] = nodes.Count,
-            ["carriers"] = carrierMetadata,
+            ["carriers"] = carrierMetadata, ["normalMaps"] = normalMaps,
             ["uv0"] = "rounded to 16-bit floats like the game", ["cameras"] = cams, ["route"] = route, ["markers"] = markers,
         };
         File.WriteAllText(Path.Combine(dir, "preview.json"), meta.ToJsonString(new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
         Console.WriteLine($"preview: {dir}\\preview.glb, {nodes.Count} sections, {tris} triangles, {images.Count} textures, {new FileInfo(Path.Combine(dir, "preview.glb")).Length / 1e6:0} MB");
         return new JsonObject { ["dir"] = dir, ["sections"] = nodes.Count, ["triangles"] = tris, ["textures"] = images.Count };
+    }
+
+    // UE -> glTF reflects Y/Z, and DX -> GL green conversion negates B again: signs cancel.
+    internal static Vector4 GltfTangent(Vector3 t, bool flip) => new(t.X, t.Z, t.Y, flip ? -1 : 1);
+
+    // BC5 has XY only. Reconstruct positive Z and convert DirectX green to OpenGL.
+    // Together with GltfTangent this preserves the transformed UE world-space shading.
+    internal static void ConvertNormalForGltf(byte[] px)
+    {
+        for (int i = 0; i < px.Length; i += 4)
+        {
+            float x = px[i] / 127.5f - 1, y = px[i + 1] / 127.5f - 1;
+            px[i + 1] = (byte)(255 - px[i + 1]);
+            px[i + 2] = (byte)Math.Clamp(MathF.Round(127.5f * (1 + MathF.Sqrt(MathF.Max(0, 1 - x * x - y * y)))), 0, 255);
+            px[i + 3] = 255;
+        }
     }
 
     /// Flat stand-in colours for game materials the preview cannot sample (linear RGBA).

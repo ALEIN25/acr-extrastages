@@ -26,6 +26,7 @@
   <h1>Stage preview</h1>
   <select id="stage"></select>
   <div id="cams"></div>
+  <label><input id="normalMaps" type="checkbox"> Normal maps (requires preview export option)</label>
   <div id="status">loading…</div>
   <div id="help">Drag to orbit, right-drag to pan, wheel to zoom. WASD / QE fly, Shift faster.</div>
 </div>
@@ -55,6 +56,14 @@ const keys = new Set();
 addEventListener('keydown', e => { if (e.target.tagName !== 'SELECT') keys.add(e.key.toLowerCase()); });
 addEventListener('keyup', e => keys.delete(e.key.toLowerCase()));
 let meta = null, model = null;
+const normalToggle = document.getElementById('normalMaps');
+function applyNormalMaps() {
+  model?.traverse(o => { if (o.isMesh) for (const m of [].concat(o.material)) {
+    m.normalMap = normalToggle.checked ? (m.userData.previewNormalMap || null) : null;
+    m.needsUpdate = true;
+  } });
+}
+normalToggle.onchange = applyNormalMaps;
 const status = document.getElementById('status');
 
 function setCam(i) {
@@ -86,7 +95,11 @@ async function load(id) {
   meta = await (await fetch(`/preview/${id}/preview.json`, { cache: 'no-store' })).json();
   const gltf = await new GLTFLoader().loadAsync(`/preview/${id}/preview.glb?${Date.now()}`);
   model = gltf.scene;
-  model.traverse(o => { if (o.isMesh) { const m = o.material; if (m.map) { m.map.wrapS = m.map.wrapT = THREE.RepeatWrapping; m.map.anisotropy = 8; } } });
+  model.traverse(o => { if (o.isMesh) for (const m of [].concat(o.material)) {
+    m.userData.previewNormalMap = m.normalMap;
+    for (const tex of [m.map, m.normalMap]) if (tex) { tex.wrapS = tex.wrapT = THREE.RepeatWrapping; tex.anisotropy = 8; }
+  } });
+  applyNormalMaps();
   scene.add(model);
   // Parent the diagnostics to the model so switching stages also removes them.
   const overlay = new THREE.Group();

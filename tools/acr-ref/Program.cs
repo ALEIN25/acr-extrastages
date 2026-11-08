@@ -43,6 +43,7 @@ internal static class Program
                 "height-survey" => HeightSurvey.Run(opts),
                 "ground-at" => HeightSurvey.GroundAt(opts),
                 "procmesh-probe" => ProcMesh.Probe(opts),
+                "procmesh-selftest" => ProcMeshSelfTest.Run(),
                 "export-info" => ExportInfo(opts),
                 "scenery-survey" => Scenery.Survey(opts),
                 "scenery-actor-slots" => Scenery.ActorSlots(opts),
