@@ -62,12 +62,14 @@ internal static class Instancing
 
     /// The template's primitives whose material is a tree material (materialKey returns its section key and MIC path; null skips
     /// the primitive, e.g. the billboard), one section per material, vertices converted to mesh-local UE cm.
-    public static TemplateMesh LoadTemplate(IEnumerable<Glb.Primitive> prims, string template, Func<string, string, int, (string key, string mic)?> materialOf)
+    public static TemplateMesh LoadTemplate(IEnumerable<Glb.Primitive> prims, string template, Func<string, string, int, (string key, string mic)?> materialOf,
+        Func<string, string, int, bool>? isTrunk = null, bool spherical = false)
     {
         var g = new StaticMeshPackage.Geometry();
         var order = new List<string>();
         var sections = new Dictionary<string, List<uint>>();
         var mics = new Dictionary<string, string>();
+        var foliage = new List<int>();
         var area3 = new Dictionary<string, double>(); var areaUv = new Dictionary<string, double>();
         int skipped = 0, found = 0;
         foreach (var p in prims)
@@ -83,6 +85,8 @@ internal static class Instancing
                 var n = p.Normal is null ? Vector3.Zero : ToUeLocal(p.Normal[i * 3], p.Normal[i * 3 + 1], p.Normal[i * 3 + 2]) / 100;
                 g.Nrm.Add(n);
             }
+            if (spherical && isTrunk is not null && !isTrunk(template, p.Material, p.Indices.Length / 3))
+                foliage.AddRange(p.Indices.Distinct().Select(i => b + (int)i));
             if (!sections.TryGetValue(key, out var idx)) { sections[key] = idx = new(); order.Add(key); mics[key] = mic; area3[key] = 0; areaUv[key] = 0; }
             for (int t = 0; t + 2 < p.Indices.Length; t += 3)
             {
@@ -109,6 +113,8 @@ internal static class Instancing
             var n = g.Nrm[i];
             g.Nrm[i] = n.LengthSquared() > 1e-8f ? Vector3.Normalize(n) : acc[i].LengthSquared() > 0 ? Vector3.Normalize(acc[i]) : Vector3.UnitZ;
         }
+        if (FoliageLighting.Centre(foliage.Select(i => g.Pos[i])) is { } centre)
+            foreach (var i in foliage) g.Nrm[i] = FoliageLighting.Normal(g.Pos[i], centre, g.Nrm[i]);
         // tangents along +U (as Visuals.UvTangents, the writer the ProceduralMesh trees already use)
         var tan = new Vector3[g.Pos.Count];
         foreach (var idx in sections.Values)
@@ -339,7 +345,7 @@ internal static class Instancing
             if (!glb.TryGetValue(template, out var prims)) { Fallback("no render mesh in objects.glb"); continue; }
             if (!prims.Any(p => isTrunk(template, p.Material, p.Indices.Length / 3))) { Fallback("no usable DR2 trunk material (foliage_trunk with an exported diffuse)"); continue; }
             TemplateMesh mesh;
-            try { mesh = LoadTemplate(prims, template, materialOf); }
+            try { mesh = LoadTemplate(prims, template, materialOf, isTrunk, FoliageLighting.Spherical(cfg)); }
             catch (InvalidDataException e) { Fallback(e.Message); continue; }
             if (mesh.Geometry.Pos.Count > 65535) { Fallback($"{mesh.Geometry.Pos.Count} vertices (the mesh writer uses 16-bit indices)"); continue; }
             // the sections of the foliage_trunk material(s): the real trunk the invisible-obstacle loop credits to the template's colliders

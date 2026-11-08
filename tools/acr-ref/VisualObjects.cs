@@ -29,7 +29,7 @@ internal static class VisualObjects
         _ => "other",
     };
 
-    sealed record Mesh(Vector3[] Pos, uint[] Idx, Vector3 Min, Vector3 Max, Vector2[] Uv, string[] TriMaterial, Dictionary<string, int> MatTris, string?[]? TreeMat = null, bool[]? TrunkTri = null);
+    sealed record Mesh(Vector3[] Pos, uint[] Idx, Vector3 Min, Vector3 Max, Vector2[] Uv, string[] TriMaterial, Dictionary<string, int> MatTris, string?[]? TreeMat = null, bool[]? TrunkTri = null, Vector3? CrownCentre = null);
 
     /// Round 3b, the middle tier: a tree mesh with only its tree-material triangles, the foliage simplified once to `ratio` of its triangles
     /// (GroundLod.SimplifyToCount, UV seams locked; at least minTris per material) and the trunk triangles kept whole (the drawn trunk is
@@ -87,7 +87,7 @@ internal static class VisualObjects
         if (idx.Count == 0) return null;
         var mn = new Vector3(float.MaxValue); var mx = new Vector3(float.MinValue);
         foreach (var v in pos) { mn = Vector3.Min(mn, v); mx = Vector3.Max(mx, v); }
-        return new Mesh(pos.ToArray(), idx.ToArray(), mn, mx, uv.ToArray(), triMat.ToArray(), triMat.GroupBy(x => x).ToDictionary(x => x.Key, x => x.Count()), treeMat.ToArray(), trunk.ToArray());
+        return new Mesh(pos.ToArray(), idx.ToArray(), mn, mx, uv.ToArray(), triMat.ToArray(), triMat.GroupBy(x => x).ToDictionary(x => x.Key, x => x.Count()), treeMat.ToArray(), trunk.ToArray(), mesh.CrownCentre);
     }
 
     /// Prefix of the per-DR2-material sections (dr2Material): "dr2:" + the section key (glb material name, see Build).
@@ -119,6 +119,7 @@ internal static class VisualObjects
         Func<string, string, int, string?>? trunkTexture = null, Func<string, string, int, string?>? treeMaterial = null,
         HashSet<string>? instanced = null)
     {
+        bool spherical = FoliageLighting.Spherical(cfg);
         int maxMeshTris = (int)cfg.Num("objects", "max_mesh_triangles");
         int sides = (int)cfg.Num("objects", "prism_sides");
         double trunkDrawCm = cfg["objects"].TryGetValue("trunk_draw_height_m", out var tdh) && tdh is double tdhd ? tdhd * 100 : 0;   // 0: whole trunk
@@ -170,7 +171,10 @@ internal static class VisualObjects
             }
             var mn = new Vector3(float.MaxValue); var mx = new Vector3(float.MinValue);
             foreach (var v in pos) { mn = Vector3.Min(mn, v); mx = Vector3.Max(mx, v); }
-            meshes[g.Key] = new Mesh(pos.ToArray(), idx.ToArray(), mn, mx, uv.ToArray(), triMat.ToArray(), matTris, treeMat, trunkTri);
+            var crown = !spherical || treeMat is null ? null : FoliageLighting.Centre(Enumerable.Range(0, idx.Count / 3)
+                .Where(t => treeMat[t] is not null && trunkTri?[t] == false)
+                .SelectMany(t => new[] { pos[(int)idx[t * 3]], pos[(int)idx[t * 3 + 1]], pos[(int)idx[t * 3 + 2]] }));
+            meshes[g.Key] = new Mesh(pos.ToArray(), idx.ToArray(), mn, mx, uv.ToArray(), triMat.ToArray(), matTris, treeMat, trunkTri, crown);
         }
         foreach (var kind in helperKinds.OrderBy(x => x))
             Console.WriteLine($"objects: removed helper {kind}: {removedHelpers.GetValueOrDefault(kind)} prototype triangles (before instancing)");
@@ -475,7 +479,7 @@ internal static class VisualObjects
                     if (objs.Probe.TriangleDepth(w[mesh.Idx[t * 3]], w[mesh.Idx[t * 3 + 1]], w[mesh.Idx[t * 3 + 2]], 50, objs.Probe.HMin, overhang, surfaceOnly: false) > meshPenLimit) { dropT[t] = true; dropN++; }
                 if (dropN > 0) { drop = dropT; realClipped++; realClippedTris += dropN; }
                 ProcMesh.Section TreeSec(string key) => sec.TryGetValue(TreePrefix + key, out var ts) ? ts : sec[TreePrefix + key] = new ProcMesh.Section();
-                int added = AddMeshSplit(t => TreeSec(tmat[t]!), _ => true, mesh, m, Ue, t => tmat[t] is not null && (drop is null || !drop[t]));
+                int added = AddMeshSplit(t => TreeSec(tmat[t]!), _ => true, mesh, m, Ue, t => tmat[t] is not null && (drop is null || !drop[t]), spherical);
                 // Fit only to triangles emitted above, including material and corridor filtering.
                 if (added > 0 && cfg.Num("objects", "precise_colliders") != 0 && objs.PreciseFitted.Add(inst["id"]!.GetValue<string>()))
                 {
@@ -680,6 +684,7 @@ internal static class VisualObjects
         {
             ["instances"] = instances, ["outside_physics_bounds"] = outside, ["trees"] = treeInstances,
             ["vegetation"] = vegetation,
+            ["foliage_normals"] = spherical ? "spherical" : "original",
             ["render_mesh_instances"] = meshInstances, ["shape_proxy_instances"] = proxyInstances,
             ["not_solid_not_drawn"] = notSolid,
             ["no_collider_static_drawn"] = staticDrawn,
@@ -1092,12 +1097,19 @@ internal static class VisualObjects
 
     /// AddMesh with each triangle routed to target(t); vertices are duplicated per target section and carry the glb UV.
     /// Returns the number of triangles that went to a section where dr2(t) holds.
-    static int AddMeshSplit(Func<int, ProcMesh.Section> target, Func<int, bool> dr2, Mesh mesh, Matrix4x4 m, Func<Vector3, V3> ue, Func<int, bool>? keep = null)
+    static int AddMeshSplit(Func<int, ProcMesh.Section> target, Func<int, bool> dr2, Mesh mesh, Matrix4x4 m, Func<Vector3, V3> ue, Func<int, bool>? keep = null, bool spherical = false)
     {
         var w = new Vector3[mesh.Pos.Length];
         var u = new Vector3[mesh.Pos.Length];
         for (int i = 0; i < mesh.Pos.Length; i++) { w[i] = Vector3.Transform(mesh.Pos[i], m); var q = ue(w[i]); u[i] = new((float)q.X, (float)q.Y, (float)q.Z); }
+        Vector3? crown = null;
+        if (spherical && mesh.CrownCentre is { } centre)
+        {
+            var q = ue(Vector3.Transform(centre, m));
+            crown = new Vector3((float)q.X, (float)q.Y, (float)q.Z);
+        }
         var maps = new Dictionary<ProcMesh.Section, Dictionary<uint, int>>();
+        var foliageVertices = new Dictionary<ProcMesh.Section, HashSet<int>>();
         int n = 0;
         for (int t = 0; t + 2 < mesh.Idx.Length; t += 3)
         {
@@ -1115,12 +1127,20 @@ internal static class VisualObjects
             var o0 = ue(w[i0]); var o1 = ue(w[i0] + Vector3.Normalize(outDr2));
             var outUe = new Vector3((float)(o1.X - o0.X), (float)(o1.Y - o0.Y), (float)(o1.Z - o0.Z));
             int a = V(i0), bb = V(i1), c = V(i2);
+            if (crown is not null && mesh.TreeMat?[t / 3] is not null && mesh.TrunkTri?[t / 3] == false)
+            {
+                if (!foliageVertices.TryGetValue(s, out var vs)) foliageVertices[s] = vs = new();
+                vs.UnionWith(new[] { a, bb, c });
+            }
             var cr = Vector3.Cross(s.Pos[bb] - s.Pos[a], s.Pos[c] - s.Pos[a]);
             if (Vector3.Dot(cr, outUe) > 0) (bb, c) = (c, bb);
             s.Nrm[a] += outUe; s.Nrm[bb] += outUe; s.Nrm[c] += outUe;
             s.Idx.AddRange([(uint)a, (uint)bb, (uint)c]);
             if (dr2(t / 3)) n++;
         }
+        if (crown is { } ctr)
+            foreach (var (s, vs) in foliageVertices)
+                foreach (var k in vs) s.Nrm[k] = FoliageLighting.Normal(s.Pos[k], ctr, s.Nrm[k]);
         return n;
     }
 

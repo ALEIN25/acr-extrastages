@@ -637,7 +637,15 @@ internal sealed class Dr2Materials
     public string TreeLeafMic(string diffuse)
     {
         var mode = _cfg.Str("vegetation", "foliage_material");
-        if (mode == "masked") return ObjectMic(diffuse);
+        if (mode == "masked")
+        {
+            bool normalMaps = !_cfg["vegetation"].TryGetValue("foliage_normal_maps", out var setting) || setting is true;
+            if (setting is not null && setting is not bool)
+                throw new InvalidDataException("vegetation.foliage_normal_maps must be a boolean");
+            if (normalMaps) return ObjectMic(diffuse);
+            return Transparency(diffuse) > _cfg.Num("dr2_textures", "masked_min_transparent")
+                ? MaskedMic("leaf_flat_" + diffuse, Texture(diffuse)) : Mic("leaf_flat_" + diffuse, Texture(diffuse));
+        }
         if (mode != "speedtree") throw new InvalidDataException("Unknown vegetation.foliage_material: " + mode);
         var colour = Texture(diffuse);
         // Flat RG normal and constant roughness in both remaining channels.

@@ -78,6 +78,13 @@ shape_min_fill = 0.8            # offline check: drawn shape bounds / collider b
 
 [vegetation]
 foliage_material = "masked" # masked | speedtree (experimental)
+# Preserve existing lighting until compared on stage data. Spherical changes only real foliage shading:
+# outward normals from the template's foliage bounds centre, shared across leaf materials and retained at mid LOD.
+# Trunks, object boxes, far billboard cards and collision are unchanged. Includes procedural and instanced trees.
+foliage_normals = "spherical" # original | spherical (original = rebuilt procedural / authored instanced)
+foliage_normal_maps = true   # masked real-tree leaves: false uses flat tangent-space normals; speedtree already uses flat
+# Object COLOR_0 and separate AO/lightmap textures are not multiplied into albedo by this converter.
+# For darkness painted into a diffuse, [albedo_compensation] supports per-texture linear gains (neutral = 1).
 # round 3: trees whose origin is within near_m of the centreline are drawn with their real LOD0 mesh (foliage_trunk opaque, foliage
 # cut-out two-sided with its normal map) instead of cards + trunk stub, nearest first until near_max_triangles are used (budget);
 # farther trees keep the cards and a thin species-bark stub

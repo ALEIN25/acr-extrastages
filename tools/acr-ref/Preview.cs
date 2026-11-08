@@ -89,6 +89,7 @@ internal static class Preview
             for (int i = 0; i < n; i++)
             {
                 var p = T(sec.Pos[i]); mn = Vector3.Min(mn, p); mx = Vector3.Max(mx, p);
+                // Export final shading normals (including optional crown-spherical foliage), never face-rebuild here.
                 var q = sec.Nrm[i]; var nn = new Vector3(q.X, q.Z, q.Y);
                 var u = i < sec.Uv.Count ? sec.Uv[i] : Vector2.Zero;
                 foreach (var (arr, at, vals) in new[] { (pos, i * 12, new[] { p.X, p.Y, p.Z }), (nrm, i * 12, new[] { nn.X, nn.Y, nn.Z }),
