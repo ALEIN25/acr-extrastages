@@ -52,8 +52,11 @@ internal static partial class StageTextures
         var sources = new List<PssgFile>();
         foreach (var file in files)
         {
+            // sponsor banners reference "sponsor_pack_a.pssg|sponsor_fallback.pssg#cloth_b.tga": the packs are filled at run time, the
+            // fallback (DR2's own default banners) lives in tracks/sponsors/
             var path = install.Exists($"{st.RouteDir}/{file}") ? $"{st.RouteDir}/{file}"
-                : install.Exists($"{st.LocDir}/{file}") ? $"{st.LocDir}/{file}" : null;
+                : install.Exists($"{st.LocDir}/{file}") ? $"{st.LocDir}/{file}"
+                : install.Exists($"tracks/sponsors/{file}") ? $"tracks/sponsors/{file}" : null;
             if (path is null) { Console.WriteLine($"  source {file}: not found"); continue; }
             try
             {

@@ -9,7 +9,7 @@ surfaces = ["GD0+", "CATG"]
 spacing_m = 0           # edge posts along both gate edges every spacing_m (0 = none: an early driving guide, DR2's own roadside objects are drawn now)
 post_width_m = 0.3
 post_height_m = 1.2
-gate_height_m = 5       # start / finish gate posts and banner
+gate_height_m = 0       # start / finish gate posts and banner of our own (0 = none: DR2's start / finish structures are drawn, [objects] overhead_templates)
 
 [materials]
 # "" = engine default material (lit world grid; shows the terrain shape). The MI_* are the game's own physical-surface
@@ -27,6 +27,7 @@ precise_max_boxes = 24
 enclosed_interior = 1
 enclosed_min_coverage = 0.7   # share of a fitted box outline (at two of five heights 0.5-2.5 m) that the object's own drawn surfaces must cover or shield before its stand-in is dropped (cars: wheel arches, porches); InvisibleCheck still checks independently
 fit_colliders_to_mesh = 1
+overhead_templates = "startfinish|lazerstart|lazerfinish|brand_arch"   # regex: start / finish arches and timing gantries that span the road by design: drawn with their DR2 mesh, minus the triangles inside the road corridor at car height
 fit_colliders_max_cm = 100
 # only used when stage-build also gets --objects (v1.3): the solid DR2 objects (the colliders written to BakedData)
 enabled = 1

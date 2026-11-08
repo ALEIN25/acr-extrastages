@@ -198,6 +198,10 @@ internal static class VisualObjects
         double meshPenLimit = objs.Probe.MaxPen + cfg.Num("objects", "road_overlap_tolerance_m") * 100;
         double maxOverBounds = cfg.Num("objects", "max_extent_over_bounds");
         var fallbacks = new SortedDictionary<string, (int n, double depth)>();
+        // [objects] overhead_templates: start / finish arches and timing gantries that span the road by design. Their render mesh is drawn
+        // even though it reaches into the road corridor; the triangles inside it at car height are left out (as for the near trees)
+        var overheadRe = cfg["objects"].TryGetValue("overhead_templates", out var ohv) && ohv is string ohs && ohs.Length > 0 ? new System.Text.RegularExpressions.Regex(ohs) : null;
+        int overheadInstances = 0, overheadDropped = 0; var overheadSections = new SortedSet<string>(StringComparer.Ordinal);
         bool Fallback(string t, double d) { var f = fallbacks.GetValueOrDefault(t); fallbacks[t] = (f.n + 1, Math.Max(f.depth, d)); return false; }
         var extents = new List<(string template, string id, double ext, double bounds)>();
         var canopyMode = canopies ?? (cfg["objects"].TryGetValue("canopies", out var cm) && cm is string cms ? cms : "clip");
@@ -484,9 +488,26 @@ internal static class VisualObjects
                 cardedPer[tname] = cardedPer.GetValueOrDefault(tname) + 1;
             }
             else if (shapes.Count > 0 && mesh is not null && mesh.Idx.Length / 3 <= maxMeshTris
-                     && MeshDepth(mesh, m, Ue, objs.Probe, overhang) is var depth && (depth <= meshPenLimit || Fallback(tname, depth)))
+                     && MeshDepth(mesh, m, Ue, objs.Probe, overhang) is var depth && (depth <= meshPenLimit || overheadRe?.IsMatch(tname) == true || Fallback(tname, depth)))
             {
                 meshInstances++;
+                bool[]? keepTri = null;
+                if (depth > meshPenLimit)
+                {
+                    overheadInstances++;
+                    var ow = mesh.Pos.Select(p => Ue(Vector3.Transform(p, m))).ToArray();
+                    keepTri = new bool[mesh.Idx.Length / 3];
+                    // a triangle on one of the object's own colliders (the legs) stays: that collision is real and must be seen
+                    var own = shapes.Select(sh => ColliderBounds(sh)).ToList();
+                    bool OnCollider(V3 c) => own.Any(b => c.X >= b.Item1.X - 30 && c.X <= b.Item2.X + 30 && c.Y >= b.Item1.Y - 30 && c.Y <= b.Item2.Y + 30 && c.Z >= b.Item1.Z - 30 && c.Z <= b.Item2.Z + 30);
+                    for (int t = 0; t < keepTri.Length; t++)
+                    {
+                        V3 ta = ow[mesh.Idx[t * 3]], tb = ow[mesh.Idx[t * 3 + 1]], tc = ow[mesh.Idx[t * 3 + 2]];
+                        keepTri[t] = OnCollider(new V3((ta.X + tb.X + tc.X) / 3, (ta.Y + tb.Y + tc.Y) / 3, (ta.Z + tb.Z + tc.Z) / 3))
+                                     || objs.Probe.TriangleDepth(ta, tb, tc, 50, objs.Probe.HMin, overhang, surfaceOnly: false) <= meshPenLimit;
+                        if (!keepTri[t]) overheadDropped++; else overheadSections.Add("objects:" + Dr2Prefix + mesh.TriMaterial[t]);
+                    }
+                }
                 if (fitBoxes)
                 {
                     var vertices = mesh.Idx.Distinct().Select(i => Ue(Vector3.Transform(mesh.Pos[i], m))).ToArray();
@@ -522,7 +543,7 @@ internal static class VisualObjects
                 if (dr2Material is null) AddMesh(sec[cls], mesh, m, pl, Ue);
                 else
                 {
-                    int n = AddMeshSplit(t => sec.GetValueOrDefault(Dr2Prefix + mesh.TriMaterial[t]) ?? sec[cls], t => sec.ContainsKey(Dr2Prefix + mesh.TriMaterial[t]), mesh, m, Ue);
+                    int n = AddMeshSplit(t => sec.GetValueOrDefault(Dr2Prefix + mesh.TriMaterial[t]) ?? sec[cls], t => sec.ContainsKey(Dr2Prefix + mesh.TriMaterial[t]), mesh, m, Ue, keepTri is null ? null : t => keepTri[t]);
                     dr2Tris += n; if (n > 0) dr2Instances++;
                 }
                 var (bmn, bmx) = WorldBox(mesh.Min, mesh.Max, m, Ue);
@@ -612,6 +633,7 @@ internal static class VisualObjects
 
         foreach (var s in sec.Values)
             for (int i = 0; i < s.Nrm.Count; i++) s.Nrm[i] = s.Nrm[i] == Vector3.Zero ? Vector3.UnitZ : Vector3.Normalize(s.Nrm[i]);
+        if (overheadInstances > 0) Console.WriteLine($"objects: overhead structures drawn with their DR2 mesh: {overheadInstances} instances, {overheadDropped} triangles inside the road corridor left out");
         Console.WriteLine($"objects: precise colliders: {preciseReplaced} boxes replaced by {preciseBoxes} boxes, {preciseKept} kept");
         Console.WriteLine($"objects: colliders fitted to render meshes: {boxesFitted} fitted, {boxesKept} kept (maximum shrink {fitMax:0} cm per side)");
         var r = new JsonObject
@@ -670,6 +692,8 @@ internal static class VisualObjects
             ["templates"] = new JsonObject(perTemplate.Select(kv => KeyValuePair.Create(kv.Key, (JsonNode?)kv.Value))),
         };
         r["collider_fit"] = r0Fit;
+        // sections of overhead structures (start / finish arches): kept triangles lie on their own colliders or outside the corridor
+        r["overhead_sections"] = new JsonArray(overheadSections.Select(x => (JsonNode?)x).ToArray());
         r["real_trees"] = new JsonObject
         {
             ["near_m"] = nearM, ["near_max_triangles"] = nearBudget == int.MaxValue ? null : nearBudget,

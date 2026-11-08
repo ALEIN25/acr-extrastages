@@ -189,7 +189,7 @@ internal static class Visuals
             posts.Idx.AddRange([0u, 2u, 1u]);
         }
         double gh = cfg.Num("markers", "gate_height_m") * 100;
-        foreach (var type in new[] { "start", "finish" })
+        foreach (var type in gh > 0 ? new[] { "start", "finish" } : [])   // gate_height_m = 0: no gates of our own (DR2's start / finish structures are drawn)
         {
             var tm = ir.Timing.First(t => t.type == type);
             var g = ir.Gates[tm.gate];
@@ -200,6 +200,14 @@ internal static class Visuals
             AddBox(gates, R - new Vector3(pw, pw, 50), R + new Vector3(pw, pw, (float)gh));
             // banner: an axis-aligned-in-plan box would not follow the road; use a quad pair across the top instead
             AddBanner(gates, L + new Vector3(0, 0, (float)gh - 80), R + new Vector3(0, 0, (float)gh - 80), 80);
+        }
+        if (gates.Idx.Count == 0)
+        {
+            // no gates: one tiny triangle 50 m below the start gate keeps the section non-empty (as the dummy)
+            var s0 = pl.ToUe(ir.Gates[ir.Timing.First(t => t.type == "start").gate].crossing);
+            var p0 = new Vector3((float)s0.X, (float)s0.Y, (float)s0.Z - 5000);
+            foreach (var off in new[] { Vector3.Zero, new Vector3(1, 0, 0), new Vector3(0, 1, 0) }) { gates.Pos.Add(p0 + off); gates.Nrm.Add(Vector3.UnitZ); gates.Uv.Add(Vector2.Zero); }
+            gates.Idx.AddRange([0u, 2u, 1u]);
         }
 
         // dummy: one tiny triangle 50 m below the start gate
@@ -990,6 +998,7 @@ internal static class Visuals
             // collider-less DR2 statics (walls, rock banks, signs): DR2 has their collision in the ground mesh, the gates' 12 m
             // corridor includes the verge they stand on; reported, not held to the limit
             var groundStatics = names.Select(x => x!.GetValue<string>()).Where(x => x.StartsWith("objects:" + VisualObjects.StaticPrefix)).ToHashSet();
+            var overheadSecs = (visualsReport?["objects"]?["overhead_sections"] as JsonArray ?? []).Select(x => x!.GetValue<string>()).ToHashSet();
             int staticTris = 0; double staticDeepest = 0;
             for (int i = 0; i < n; i++)
             {
@@ -999,6 +1008,13 @@ internal static class Visuals
                 {
                     // copies of kept colliders (the collision is there either way; hiding them would be an invisible obstacle)
                     C(true, $"visuals road corridor: {name} {secs[i].Idx.Count / 3} triangles are copies of kept object colliders, not held to the limit");
+                    continue;
+                }
+                if (overheadSecs.Contains(name))
+                {
+                    // start / finish arches and gantries ([objects] overhead_templates): what is left inside the corridor lies on their own
+                    // colliders (the legs); the collision is there either way, and InvisibleCheck holds it to being drawn
+                    C(true, $"visuals road corridor: {name} {secs[i].Idx.Count / 3} triangles of an overhead structure on its own colliders, not held to the limit");
                     continue;
                 }
                 bool soft = name == "objects:soft" || name.StartsWith("objects:" + VisualObjects.CardPrefix), isPosts = name == "posts";

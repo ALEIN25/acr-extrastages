@@ -29,6 +29,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - The road-edge marker posts are gone (`[markers] spacing_m = 0`); the stage's own DiRT Rally 2.0
   roadside objects are drawn instead.
+- Start / finish: our own gate posts and banner are gone (`gate_height_m = 0`); DiRT Rally 2.0's own
+  start arch, finish gantry and brand arches are drawn with their real models (`[objects]
+  overhead_templates`), minus the parts inside the road corridor that have no collider under them.
 
 - Better-looking objects: tree trunks, collider-shaped objects (rocks, fences, barriers) and the
   road-edge posts now use textures from the stage's own DiRT Rally 2.0 files (bark, rock, wood,
@@ -42,6 +45,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Sponsor banners and drapes (scaffolding cloths, start / finish banners) showed a placeholder
+  texture: their textures live in DiRT Rally 2.0's shared `game.nefs`, which is now read.
 - The car no longer starts among the parked start-area vehicles: it waits 12 m before the start
   line, on every stage.
 - Tree trunks no longer stand 20 m tall in white birch bark, and buildings no longer pick up each
