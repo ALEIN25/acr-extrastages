@@ -12,7 +12,7 @@ internal static class GroundCover
     static string TexName(string reference) => Path.GetFileNameWithoutExtension(reference[(reference.LastIndexOf('#') + 1)..]);
 
     public static (Dictionary<string, ProcMesh.Section> sections, JsonObject report) Build(
-        StageBuild.Ir ir, StageBuild.Placement pl, Toml cfg, Func<V3, bool> inBounds, Dr2Materials? dr2)
+        StageBuild.Ir ir, StageBuild.Placement pl, Toml cfg, Func<V3, bool> inBounds, Dr2Materials? dr2, Visuals.TopSurface ground)
     {
         var sections = new Dictionary<string, ProcMesh.Section>();
         var settings = cfg["ground_cover"];
@@ -21,8 +21,8 @@ internal static class GroundCover
         var report = new JsonObject { ["mode"] = mode, ["triangles"] = 0, ["instances"] = 0, ["prototypes_used"] = 0 };
         if (mode == "off") { Console.WriteLine("ground cover: off, 0 triangles"); return (sections, report); }
         double Num(string key, double fallback) => settings.TryGetValue(key, out var v) && v is double n ? n : fallback;
-        double density = Num("density", 0.4), maxDistance = Num("max_distance_m", 40);
-        double budgetValue = Num("triangle_budget", 80000);
+        double density = Num("density", 1.5), maxDistance = Num("max_distance_m", 6);
+        double budgetValue = Num("triangle_budget", 1200000);
         if (!double.IsFinite(density) || density < 0 || density > 100 || !double.IsFinite(maxDistance) || maxDistance < 2 || maxDistance > 40
             || !double.IsFinite(budgetValue) || budgetValue < 0 || budgetValue > 2000000 || budgetValue != Math.Floor(budgetValue))
             throw new InvalidDataException("ground_cover: density must be 0..100, max_distance_m 2..40, triangle_budget an integer 0..2000000");
@@ -48,6 +48,8 @@ internal static class GroundCover
         int kept = 0, rejected = 0, triangleCount = 0;
         int minTriangles = prototypes.Min(p => p.Triangles);
         var used = new HashSet<int>();
+        var alpha = CheckAlpha(ir.Dir, prototypes);
+        int transparentPlaced = 0, flippedTransparentPlaced = 0, missingGround = 0, patches = 0;
         void Place(Vector3 p)
         {
             var eligible = prototypes.Where(p => p.Triangles <= budget - triangleCount).ToArray();
@@ -62,6 +64,8 @@ internal static class GroundCover
             // Bound the whole transformed prototype, including the second billboard and hairpins.
             if (clearance - radius < 200 || clearance + radius > maxDistance * 100)
             { rejected++; return; }
+            if (ground.At(new(p.X, p.Y)) is not { } height) { missingGround++; rejected++; return; }
+            p.Z = (float)height + 2;
             var yaw = Matrix4x4.CreateRotationZ((float)(random.NextDouble() * Math.Tau));
             foreach (var part in prototype.Parts)
             {
@@ -69,16 +73,17 @@ internal static class GroundCover
                 Emit(section, part, p, scale, yaw);
             }
             triangleCount += prototype.Triangles; used.Add(prototype.Id); kept++;
+            if (alpha[prototype.Id].transparent) transparentPlaced++;
+            if (alpha[prototype.Id].flipped) flippedTransparentPlaced++;
         }
         if (mode == "scatter" && density > 0 && budget >= minTriangles)
         {
-            // Collision terrain has decoded surface classes; restrict to grass rather than growing plants on rock,
-            // water, snow, or gravel. Sample barycentrically on the actual triangles, never a flat height estimate.
+            // Collision selects grass-class patch centres; rendered ground supplies every plant's final Z.
             var triangles = new List<(Vector3 a, Vector3 b, Vector3 c)>();
             var cumulative = new List<double>(); double area = 0;
             foreach (var prim in new Glb(Path.Combine(ir.Dir, "collision.glb")).Primitives())
             {
-                if (!Regex.IsMatch(prim.Material, @"^(GR|GS|GGL|GWT)", RegexOptions.IgnoreCase)) continue;
+                if (!Regex.IsMatch(prim.Material, @"^(GR|GS|GGL|GWT|DEFA|DBK)", RegexOptions.IgnoreCase)) continue;
                 Vector3 P(uint v) { var q = pl.ToUe(new[] { (double)prim.Positions[v * 3], prim.Positions[v * 3 + 1], prim.Positions[v * 3 + 2] }); return new((float)q.X, (float)q.Y, (float)q.Z); }
                 for (int t = 0; t < prim.Indices.Length; t += 3)
                 {
@@ -100,11 +105,19 @@ internal static class GroundCover
             int attempts = (int)Math.Min(Math.Floor(area * density + random.NextDouble()), budget / minTriangles);
             for (int i = 0; i < attempts; i++)
             {
+                if (budget - triangleCount < minTriangles) break;
                 int ix = cumulative.BinarySearch(random.NextDouble() * area); if (ix < 0) ix = ~ix;
                 var (a, b, c) = triangles[ix];
                 float u = (float)random.NextDouble(), v = (float)random.NextDouble();
                 if (u + v > 1) { u = 1 - u; v = 1 - v; }
-                Place(a + (b - a) * u + (c - a) * v);
+                var centre = a + (b - a) * u + (c - a) * v;
+                int count = random.Next(4, 13); patches++;
+                float patchRadius = 40 + (float)random.NextDouble() * 110;
+                for (int k = 0; k < count; k++)
+                {
+                    float angle = (float)(random.NextDouble() * Math.Tau), distance = patchRadius * MathF.Sqrt((float)random.NextDouble());
+                    Place(centre + new Vector3(MathF.Cos(angle) * distance, MathF.Sin(angle) * distance, 0));
+                }
             }
             report["candidate_area_m2"] = area;
             report["attempts"] = attempts;
@@ -125,12 +138,45 @@ internal static class GroundCover
             report["plant_ornaments"] = instances.Count;
         }
         report["instances"] = kept; report["triangles"] = triangleCount; report["rejected"] = rejected; report["prototypes_used"] = used.Count;
+        report["patches"] = patches; report["missing_drawn_ground"] = missingGround;
+        report["uv_centre_transparent_instances"] = transparentPlaced;
+        report["uv_centre_flipped_v_transparent_instances"] = flippedTransparentPlaced;
+        Console.WriteLine($"ground cover: drawn-ground +2 cm, {patches} candidate patches (4..12 plants, radius 0.4..1.5 m), {missingGround} missing-ground rejects");
+        Console.WriteLine($"ground cover: UV centre alpha: {transparentPlaced}/{kept} placed prototypes on transparent texels; flipped V would be {flippedTransparentPlaced}/{kept}; leaf MIC = tree-card LeafMic");
         Console.WriteLine($"ground cover: {mode}, {kept} plants, {triangleCount} triangles (budget {budget}), {textures.Length} textures, {used.Count} prototypes used, {rejected} rejected");
         return (sections, report);
     }
 
     internal sealed record Part(string Texture, bool Billboard, Vector3[] Positions, Vector3[] Normals, Vector2[] Uv, uint[] Indices);
     internal sealed record Prototype(int Id, string Name, Part[] Parts, float Radius, int Triangles, int Weight);
+
+    internal static Dictionary<int, (bool transparent, bool flipped)> CheckAlpha(string dir, IReadOnlyList<Prototype> prototypes)
+    {
+        var decoded = new Dictionary<string, (byte[] pixels, int w, int h)>();
+        bool Transparent(Part part, bool flip)
+        {
+            if (!decoded.TryGetValue(part.Texture, out var image))
+            {
+                var d = new Dds(Path.Combine(dir, "textures", part.Texture + ".dds"));
+                image = (d.Format == Dds.Fmt.BC7 ? Preview.DecodeBc7(d.Mips[0], d.Width, d.Height) : d.Decode(0)!, d.Width, d.Height);
+                decoded[part.Texture] = image;
+            }
+            // Bounding UV rectangle centre, sampled in the DDS's top-to-bottom row convention.
+            float u = (part.Uv.Min(v => v.X) + part.Uv.Max(v => v.X)) / 2;
+            float v = (part.Uv.Min(v => v.Y) + part.Uv.Max(v => v.Y)) / 2;
+            if (flip) v = 1 - v;
+            int x = Math.Clamp((int)(u * image.w), 0, image.w - 1), y = Math.Clamp((int)(v * image.h), 0, image.h - 1);
+            return image.pixels[(y * image.w + x) * 4 + 3] < 128;
+        }
+        var result = prototypes.ToDictionary(p => p.Id, p => (transparent: p.Parts.All(part => Transparent(part, false)), flipped: p.Parts.All(part => Transparent(part, true))));
+        Console.WriteLine($"ground cover: atlas alpha inventory: {result.Values.Count(v => v.transparent)}/{prototypes.Count} prototype centres transparent; flipped V {result.Values.Count(v => v.flipped)}/{prototypes.Count}");
+        foreach (var texture in prototypes.SelectMany(p => p.Parts).Select(p => p.Texture).Distinct())
+        {
+            var parts = prototypes.SelectMany(p => p.Parts).Where(p => p.Texture == texture).ToArray();
+            Console.WriteLine($"ground cover: {texture} UV centre alpha: {parts.Count(p => Transparent(p, false))}/{parts.Length} transparent; flipped V {parts.Count(p => Transparent(p, true))}/{parts.Length}");
+        }
+        return result;
+    }
 
     internal static List<Prototype> LoadPrototypes(string dir, Dr2Materials dr2, HashSet<string>? allowed = null)
     {

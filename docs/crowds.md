@@ -1,7 +1,7 @@
 # Spectator crowds
 
 Opt in with `[crowds] mode = "dr2_spots"` in `config/visuals.toml`.
-The default remains `off`. `max_spawners = 40` caps groups **per gameplay cell**;
+The shipped configuration enables `dr2_spots`; a missing setting defaults to `off`. `max_spawners = 40` caps groups **per gameplay cell**;
 zero emits none. Each group currently preserves all four native baked spectators.
 No density reduction or ambient sound actor is implemented.
 
@@ -13,7 +13,7 @@ The inspected Hafren cell `0SEKWS6594N5CV2V6D2XLJYYI` contains one
 `Crowd Runtime`. The actor's BakedSpawnData contains four Elements with transforms
 relative to Root, representation/customization names and animation buckets.
 Crowd Runtime.BoundsRadius is retained verbatim (245.2922 cm), because the baked
-elements and their relative transforms are unchanged.
+elements retain their native XY offsets and rotations. Their Z offsets are conformed to drawn ground.
 
 `CrowdEmission.cs` clones those five export blobs. A restricted usmap-driven
 walker identifies FNames and object references at actual property boundaries;
@@ -26,8 +26,8 @@ are remapped. Actor names have unique UAID-style suffixes and fresh actor GUIDs;
 component names retain their native names under distinct actor outers.
 The Level native actor array and create-before-serialization dependencies grow.
 
-Root gets the spot position in UE centimetres and yaw toward the nearest XY
-centreline point, with zero pitch/roll. Group elements remain relative.
+Root gets the spot XY in UE centimetres, the drawn-ground height, and yaw toward the nearest XY
+centreline point, with zero pitch/roll. Each relative XY offset is rotated by that yaw before sampling the exact rendered terrain/road triangles. Each element keeps X/Y and gets Translation.Z = drawn height at its world XY minus root Z. The usmap walker locates each Transform.Translation at property boundaries. Crowd emission follows the completed visual pass, including terrain physics fill.
 The unchanged blueprint pair is copied to output so CUE4Parse can decode the
 standalone cells without a game mount. Launcher stage-template extraction includes
 both the template cell and blueprint.
@@ -37,13 +37,10 @@ both the template cell and blueprint.
 `Crowds.cs` accepts `core_crowd_*` and spectator-named template origins from
 stage.json objects and ornaments. Positions need at least 400 cm road-edge
 clearance, must fit physics bounds including height, and are deduplicated at
-1 cm resolution. Nonfinite or malformed positions fail. Source height is retained;
-there is no invented terrain snap. The reverse gameplay cell uses the reverse
+1 cm resolution. Nonfinite or malformed positions fail. Emission rejects missing drawn ground and slopes above `[crowds] max_slope_degrees = 25`, sampled over the rotated group footprint and at every foot. Rejection happens before the spawner cap. The reverse gameplay cell uses the reverse
 IR's spots; only render visuals retain the existing shared-forward-IR policy.
 
-Clearance applies to the group origin, not every spectator footprint. Native
-relative Z offsets are retained. Terrain contact, nearby props and group
-footprints need in-game inspection. This implementation does not decode DR2
+Clearance applies to the group origin, not every spectator footprint. Nearby props and group footprints still need in-game inspection. This implementation does not decode DR2
 crowd_*.bin; stages without crowd-like object/ornament records emit no groups.
 Trigger volumes are not spectator placement evidence.
 
@@ -74,10 +71,14 @@ Output must differ from the input legacy root. No game directory is needed.
 Stage-build checks and stage-check re-read written cells through CUE4Parse with
 the blueprint and usmap. They assert the emitted actor count, Level actor-list
 membership, four owned components and the actor's references to them, baked
-people count, root position within 1 cm on each axis, and yaw within 0.01 degree.
+people count, root position within 1 cm on each axis, and yaw within 0.01 degree. They also assert root contact and every baked person's world Z within 5 cm of the rendered ground at yaw-rotated world XY.
 Successful checks print:
 
 `crowds: emitted N spawners (M people) in <cell>`
+
+`crowds: drawn-ground contact: M people within 5 cm (rotated world XY)`
+
+Emission also logs accepted groups and missing-ground / steep-slope rejects. The native self-test includes a sloped plane, a missing-ground spot and a 45-degree rejected spot.
 
 Validated: Release build, synthetic planning test, and native cloning/re-reading
 in copies of 0SEK, forward 22VG and reverse 7FF9 (two spawners, eight people each).

@@ -85,12 +85,25 @@ internal static class GroundCoverSelfTest
         }
         int failures = 0;
         void Check(bool ok, string label) { Console.WriteLine($"{(ok ? "PASS" : "FAIL")} ground cover: {label}"); if (!ok) failures++; }
+        var ground = new Visuals.TopSurface();
+        ground.Add(new(-5000, -1000, -300), new(5000, -1000, 700), new(5000, 11000, 700));
+        ground.Add(new(-5000, -1000, -300), new(5000, 11000, 700), new(-5000, 11000, -300));
         var cfg = Config("scatter"); var dr2 = new Dr2Materials(cfg, dir, dir, dir);
-        var (sections, report) = GroundCover.Build(ir, pl, cfg, _ => true, dr2);
+        var (sections, report) = GroundCover.Build(ir, pl, cfg, _ => true, dr2, ground);
         var plants = sections.Values.SelectMany(s => s.Pos).ToArray();
         var prototypes = GroundCover.LoadPrototypes(dir, dr2);
         Check(prototypes.Count == 2 && prototypes[0].Triangles == 8 && prototypes[1].Triangles == 1
             && Math.Abs(prototypes[0].Radius - 40) < .01f, "node hierarchy, scale, palette rebasing and real triangle costs");
+        // Asymmetric alpha catches an accidental V flip: top rows transparent, bottom rows opaque.
+        dds[129] = 255;
+        ulong alphaIndices = 0;
+        for (int i = 8; i < 16; i++) alphaIndices |= 1UL << (3 * i);
+        for (int i = 0; i < 6; i++) dds[130 + i] = (byte)(alphaIndices >> (8 * i));
+        foreach (var name in new[] { "test_grass_d", "test_clutter_d" }) File.WriteAllBytes(Path.Combine(dir, "textures", name + ".dds"), dds);
+        var alphaCheck = GroundCover.CheckAlpha(dir, prototypes);
+        Check(alphaCheck.Values.All(a => a.transparent && !a.flipped), "decoded asymmetric alpha distinguishes preserved V from flipped V");
+        Array.Clear(dds, 129, 7);
+        foreach (var name in new[] { "test_grass_d", "test_clutter_d" }) File.WriteAllBytes(Path.Combine(dir, "textures", name + ".dds"), dds);
         Check(sections.Count == 2 && report["prototypes_used"]!.GetValue<int>() == 2
             && sections["test_grass_d"].Idx.Count % 24 == 0
             && sections["test_clutter_d"].Idx.Count % 3 == 0
@@ -103,18 +116,20 @@ internal static class GroundCoverSelfTest
             return Enumerable.Range(0, pair.Value.Pos.Count / stride).All(i => {
                 var a = pair.Value.Pos[i * stride]; var b = pair.Value.Pos[i * stride + 1];
                 float width = Vector3.Distance(a, b), original = stride == 16 ? 80 : 40;
-                return Math.Abs(a.Z - (a.X + b.X) * .05f) < .01f && width / original >= .7999f && width / original <= 1.2501f;
+                return Math.Abs(a.Z - ((a.X + b.X) * .05f + 202)) < .01f && width / original >= .7999f && width / original <= 1.2501f;
             });
-        }), "bases follow sloping terrain; scale 0.8..1.25");
+        }), "bases follow drawn terrain 2 m above collision, plus 2 cm; scale 0.8..1.25");
         Check(sections.Values.All(s => !s.Collision && s.Nrm.All(n => n.Z > 0.9f && Math.Abs(n.Length() - 1) < 1e-5f)), "no collision; unit sky-tilted normals on both faces");
-        var again = GroundCover.Build(ir, pl, cfg, _ => true, dr2);
+        var again = GroundCover.Build(ir, pl, cfg, _ => true, dr2, ground);
         Check(plants.SequenceEqual(again.sections.Values.SelectMany(s => s.Pos)), "deterministic scatter");
-        Check(GroundCover.Build(ir, pl, Config("off"), _ => true, null).sections.Count == 0, "off needs no materials");
-        Check(GroundCover.Build(ir, pl, Config("scatter", 0), _ => true, dr2).sections.Count == 0, "zero budget");
-        var tiny = GroundCover.Build(ir, pl, Config("scatter", 7), _ => true, dr2);
+        Check(GroundCover.Build(ir, pl, Config("off"), _ => true, null, ground).sections.Count == 0, "off needs no materials");
+        Check(GroundCover.Build(ir, pl, Config("scatter", 0), _ => true, dr2, ground).sections.Count == 0, "zero budget");
+        var tiny = GroundCover.Build(ir, pl, Config("scatter", 7), _ => true, dr2, ground);
         Check(tiny.report["triangles"]!.GetValue<int>() <= 7 && !tiny.sections.ContainsKey("test_grass_d"), "small budget excludes costly prototypes");
-        Check(GroundCover.Build(ir, pl, Config("scatter", 800, 0), _ => true, dr2).sections.Count == 0, "zero density");
-        Check(GroundCover.Build(ir, pl, cfg, _ => false, dr2).sections.Count == 0, "physics bounds rejection");
+        Check(GroundCover.Build(ir, pl, Config("scatter", 800, 0), _ => true, dr2, ground).sections.Count == 0, "zero density");
+        Check(GroundCover.Build(ir, pl, cfg, _ => false, dr2, ground).sections.Count == 0, "physics bounds rejection");
+        Check(GroundCover.Build(ir, pl, cfg, _ => true, dr2, new Visuals.TopSurface()).sections.Count == 0,
+            "missing drawn ground rejects plants instead of falling back to collision");
         File.WriteAllText(Path.Combine(dir, "stage.json"), """
             {"ornaments":{"instances":[
               {"template":"test_grass_01","transform":{"position":[10,1,50]}},
@@ -122,12 +137,12 @@ internal static class GroundCoverSelfTest
               {"template":"rock_01","transform":{"position":[10,1,50]}}
             ]}}
             """);
-        var ornaments = GroundCover.Build(ir, pl, Config("ornaments"), _ => true, dr2);
+        var ornaments = GroundCover.Build(ir, pl, Config("ornaments"), _ => true, dr2, ground);
         Check(ornaments.report["instances"]!.GetValue<int>() == 1 && ornaments.report["triangles"]!.GetValue<int>() is 1 or 8,
             "ornament plant anchors only; road plant rejected");
         dds[128] = 255; File.WriteAllBytes(Path.Combine(dir, "textures", "test_grass_d.dds"), dds);
         File.WriteAllBytes(Path.Combine(dir, "textures", "test_clutter_d.dds"), dds);
-        Check(GroundCover.Build(ir, pl, cfg, _ => true, dr2).sections.Count == 0, "opaque terrain grass is never a plant card");
+        Check(GroundCover.Build(ir, pl, cfg, _ => true, dr2, ground).sections.Count == 0, "opaque terrain grass is never a plant card");
         dds[128] = 0;
         // Preview exports the same named sections, including cutout alpha and sky normals.
         dr2.MicBase["/Game/Test/Leaf"] = "/Game/Test/Grass";
@@ -144,6 +159,7 @@ internal static class GroundCoverSelfTest
             && File.Exists(Path.Combine(finland, "textures", "gc_clutter_d.dds")))
         {
             var real = GroundCover.LoadPrototypes(finland, new Dr2Materials(cfg, finland, dir, dir));
+            GroundCover.CheckAlpha(finland, real);
             Console.WriteLine($"Finland prototype inventory: {real.Count}, {real.Sum(p => p.Triangles)} triangles, {real.Count(p => p.Weight > 1)} grass-weighted, max radius {real.Select(p => p.Radius).DefaultIfEmpty().Max():0.##} cm");
             Check(real.Count == 78 && real.Sum(p => p.Triangles) == 1828
                 && real.SelectMany(p => p.Parts).Select(p => p.Texture).Distinct().Count() == 2

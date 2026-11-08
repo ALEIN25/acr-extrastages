@@ -820,7 +820,8 @@ internal static class Visuals
             ((JsonObject)r["instancing"]!)["keep_placeholders"] = keepMics.Count;
             Console.WriteLine($"visuals: instancing: {keepMics.Count} placeholder sections keep the instanced meshes' materials imported");
         }
-        var (coverSections, coverReport) = GroundCover.Build(ir, pl, cfg, inPhysicsBounds, dr2);
+        var (coverSections, coverReport) = GroundCover.Build(ir, pl, cfg, inPhysicsBounds, dr2,
+            GroundSurface(sections, sectionNames.Select(n => n!.GetValue<string>()).ToList()));
         foreach (var (texture, section) in coverSections)
         {
             int at = Enumerable.Range(0, sectionNames.Count).FirstOrDefault(i => sectionNames[i]!.GetValue<string>() == "vista", sectionNames.Count);
@@ -968,6 +969,26 @@ internal static class Visuals
             }).ToList();
         return [(Enumerable.Range(0, cell.ExportCount).Where(i => cell.ExportClass(i) == "ProceduralMeshComponent")
             .MaxBy(i => cell.GetExportData(i).Length), (report?["sections"] as JsonArray)?.Select(n => n!.GetValue<string>()).ToList())];
+    }
+
+    // Exact rendered ground triangles, excluding objects, tree canopies and plant cards.
+    internal static TopSurface GroundSurface(IReadOnlyList<ProcMesh.Section> sections, IReadOnlyList<string>? names)
+    {
+        var ground = new TopSurface();
+        for (int i = 0; i < sections.Count; i++)
+        {
+            bool include = names is null ? i is 1 or 2 : names[i].StartsWith("terrain") || names[i].StartsWith("road");
+            if (!include) continue;
+            var s = sections[i];
+            for (int t = 0; t + 2 < s.Idx.Count; t += 3)
+                ground.Add(s.Pos[(int)s.Idx[t]], s.Pos[(int)s.Idx[t + 1]], s.Pos[(int)s.Idx[t + 2]]);
+        }
+        return ground;
+    }
+    internal static TopSurface GroundSurface(LegacyPackage cell, JsonNode? report)
+    {
+        var (sections, names) = Drawn(cell, report);
+        return GroundSurface(sections, names);
     }
 
     internal static (List<ProcMesh.Section> Sections, List<string>? Names) Drawn(LegacyPackage cell, JsonNode? report)
@@ -1377,7 +1398,7 @@ internal static class Visuals
     }
 
     /// Highest up-facing (|n_z| >= 0.3) triangle under a plan point, UE cm, bucketed on a 4 m grid.
-    sealed class TopSurface
+    internal sealed class TopSurface
     {
         const float Cell = 400;
         readonly Dictionary<(int, int), List<(Vector3 a, Vector3 b, Vector3 c)>> _cells = new();

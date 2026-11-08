@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.Text.Json.Nodes;
+using System.Numerics;
 using CUE4Parse.FileProvider;
 using CUE4Parse.MappingsProvider;
 using CUE4Parse.MappingsProvider.Usmap;
@@ -30,6 +31,7 @@ internal static class CrowdEmission
     // Restricted schema walker for this graph and Level's property prefix. Unknown serializers fail closed.
     sealed class Layout
     {
+        public Action<string, Dictionary<string, int>>? Visit;
         readonly Dictionary<string, Dictionary<int, (string name, PropertyType type)>> types = new();
         public Layout(string usmap)
         {
@@ -54,6 +56,7 @@ internal static class CrowdEmission
                 var prop = types[name][slot.Index]; result[prop.name] = p;
                 Value(d, ref p, prop.type, refs, names);
             }
+            Visit?.Invoke(name, result);
             return result;
         }
         void Value(byte[] d, ref int p, PropertyType t, Func<int, int>? refs, Func<int, int>? names)
@@ -92,18 +95,55 @@ internal static class CrowdEmission
     static void Put(byte[] d, int p, int value) => BinaryPrimitives.WriteInt32LittleEndian(d.AsSpan(p), value);
     static void Double(byte[] d, int p, double value) => BinaryPrimitives.WriteDoubleLittleEndian(d.AsSpan(p), value);
 
-    public static void Emit(LegacyPackage cell, string legacy, string usmap, Toml cfg, JsonObject report, IReadOnlyList<V3> centre)
+    public static void Emit(LegacyPackage cell, string legacy, string usmap, Toml cfg, JsonObject report, IReadOnlyList<V3> centre, Visuals.TopSurface ground)
     {
         if (report["mode"]?.GetValue<string>() != "dr2_spots") return;
         int cap = cfg["crowds"].TryGetValue("max_spawners", out var v) ? Convert.ToInt32(v) : 40;
         if (cap < 0) throw new ArgumentException("[crowds] max_spawners must be nonnegative");
-        var spots = report["spots"]!.AsArray().Take(cap).ToArray();
+        var spots = report["spots"]!.AsArray().ToArray();
         var emitted = new JsonArray(); report["emitted"] = emitted;
         report["actors_emitted"] = 0; report["people_emitted"] = 0; report["status"] = "emitted";
         if (spots.Length == 0) return;
         var src = new LegacyPackage(HostPaths.Resolve(legacy, Template));
         var layout = new Layout(usmap);
         int actor = Enumerable.Range(0, src.ExportCount).Single(e => src.ExportClass(e) == ActorClass);
+        var templateData = src.GetExportData(actor);
+        var translations = new List<int>();
+        layout.Visit = (name, fields) => { if (name == "Transform") translations.Add(fields["Translation"]); };
+        int scan = 0; layout.Struct(templateData, ref scan, "CrowdSystemSpawnerBakedActor");
+        layout.Visit = null;
+        if (translations.Count == 0) throw new InvalidDataException("crowds: no baked Transform translations found");
+        double Read(int at) => BinaryPrimitives.ReadDoubleLittleEndian(templateData.AsSpan(at));
+        double slopeLimit = cfg["crowds"].TryGetValue("max_slope_degrees", out var slope) ? Convert.ToDouble(slope) : 25;
+        if (!double.IsFinite(slopeLimit) || slopeLimit < 0 || slopeLimit > 45) throw new ArgumentException("crowds.max_slope_degrees must be 0..45");
+        int noGround = 0, steep = 0;
+        var route = new StageBuild.Polyline(centre.ToList());
+        bool Accept(JsonNode? spot)
+        {
+            var xyz = spot!["ue_cm"]!.AsArray().Select(x => x!.GetValue<double>()).ToArray();
+            var target = route.At(route.Project(new(xyz[0], xyz[1], xyz[2])).s, 0, 0, out _);
+            double yaw = Math.Atan2(target.Y - xyz[1], target.X - xyz[0]);
+            var offsets = translations.Select(at => new Vector2((float)(Read(at) * Math.Cos(yaw) - Read(at + 8) * Math.Sin(yaw)),
+                (float)(Read(at) * Math.Sin(yaw) + Read(at + 8) * Math.Cos(yaw)))).ToArray();
+            // Sample a 50 cm grid across the group's full bounding footprint, as well as each foot.
+            var points = new List<Vector2> { new((float)xyz[0], (float)xyz[1]) };
+            points.AddRange(offsets.Select(o => points[0] + o));
+            for (float x = offsets.Min(o => o.X) - 30; x <= offsets.Max(o => o.X) + 80; x += 50)
+                for (float y = offsets.Min(o => o.Y) - 30; y <= offsets.Max(o => o.Y) + 80; y += 50)
+                    points.Add(new((float)xyz[0] + x, (float)xyz[1] + y));
+            var heights = points.Select(ground.At).ToArray();
+            if (heights.Any(h => h is null)) { noGround++; return false; }
+            double limit = Math.Tan(slopeLimit * Math.PI / 180);
+            for (int i = 0; i < points.Count; i++)
+                for (int k = i + 1; k < points.Count; k++)
+                    if (Vector2.Distance(points[i], points[k]) > 1 && Math.Abs(heights[i]!.Value - heights[k]!.Value) > Vector2.Distance(points[i], points[k]) * limit)
+                    { steep++; return false; }
+            spot["ue_cm"] = new JsonArray(xyz[0], xyz[1], heights[0]!.Value);
+            return true;
+        }
+        spots = spots.Where(Accept).Take(cap).ToArray();
+        report["rejected_no_drawn_ground"] = noGround; report["rejected_slope"] = steep;
+        Console.WriteLine($"crowds: drawn ground: {spots.Length} groups accepted, {noGround} missing ground, {steep} over {slopeLimit:0.#} degrees rejected");
         int[] graph = [actor, .. Enumerable.Range(0, src.ExportCount).Where(e => src.ExportOuter(e) == actor + 1)];
         if (graph.Length != 5) throw new InvalidDataException("crowds: expected four template subobjects");
         int level = Enumerable.Range(0, cell.ExportCount).Single(e => cell.ExportClass(e) == "Level");
@@ -143,6 +183,13 @@ internal static class CrowdEmission
                 {
                     int q = props["BakedSpawnData"]; var baked = layout.Struct(data, ref q, "CrowdSystemSpawnData");
                     people += Int(data, baked["Elements"]);
+                    foreach (int at in translations)
+                    {
+                        double angle = yaw * Math.PI / 180, x = Read(at), y = Read(at + 8);
+                        var xy = new Vector2((float)(xyz[0] + x * Math.Cos(angle) - y * Math.Sin(angle)),
+                            (float)(xyz[1] + x * Math.Sin(angle) + y * Math.Cos(angle)));
+                        Double(data, at + 16, ground.At(xy)!.Value - xyz[2]);
+                    }
                     // Native actor trailer contains a label and actor instance GUID. Give every clone a fresh GUID.
                     if (data.Length - p < 32) throw new InvalidDataException("crowds: missing actor GUID trailer");
                     Guid.NewGuid().ToByteArray().CopyTo(data, data.Length - 32);
@@ -172,7 +219,7 @@ internal static class CrowdEmission
         report["actors_emitted"] = spots.Length; report["people_emitted"] = people;
     }
 
-    public static int Check(string root, string cellPath, string usmap, JsonNode report, TextWriter w)
+    public static int Check(string root, string cellPath, string usmap, JsonNode report, TextWriter w, Visuals.TopSurface ground)
     {
         if (report["mode"]?.GetValue<string>() != "dr2_spots") return 0;
         using var provider = new DefaultFileProvider(Path.Combine(root, "acr"), SearchOption.AllDirectories, new VersionContainer(EGame.GAME_UE5_6), StringComparer.OrdinalIgnoreCase);
@@ -206,11 +253,25 @@ internal static class CrowdEmission
             var loc = components.Single(e => e.ExportType == "SceneComponent").GetOrDefault<FVector>("RelativeLocation");
             var xyz = spot!["ue_cm"]!.AsArray().Select(x => x!.GetValue<double>()).ToArray();
             if (Math.Abs(loc.X - xyz[0]) > 1 || Math.Abs(loc.Y - xyz[1]) > 1 || Math.Abs(loc.Z - xyz[2]) > 1) throw new InvalidDataException("crowds: root placement mismatch");
+            if (ground.At(new((float)loc.X, (float)loc.Y)) is not { } rootHeight || Math.Abs(loc.Z - rootHeight) > 5)
+                throw new InvalidDataException("crowds: root is not on drawn ground");
             var rot = components.Single(e => e.ExportType == "SceneComponent").GetOrDefault<FRotator>("RelativeRotation");
             if (Math.Abs(rot.Yaw - spot["yaw"]!.GetValue<double>()) > 0.01) throw new InvalidDataException("crowds: root yaw mismatch");
+            var elements = actor.GetOrDefault<FStructFallback>("BakedSpawnData")!.GetOrDefault<UScriptArray>("Elements")!;
+            foreach (var element in elements.Properties)
+            {
+                var transform = element.GetValue<FStructFallback>()!.GetOrDefault<FTransform>("Transform");
+                double angle = rot.Yaw * Math.PI / 180;
+                var foot = transform.Translation;
+                var xy = new Vector2((float)(loc.X + foot.X * Math.Cos(angle) - foot.Y * Math.Sin(angle)),
+                    (float)(loc.Y + foot.X * Math.Sin(angle) + foot.Y * Math.Cos(angle)));
+                if (ground.At(xy) is not { } h || Math.Abs(loc.Z + foot.Z - h) > 5)
+                    throw new InvalidDataException("crowds: baked person's world Z differs from drawn ground by > 5 cm");
+            }
         }
         if (people != report["people_emitted"]!.GetValue<int>()) throw new InvalidDataException("crowds: baked people count mismatch");
         w.WriteLine($"crowds: emitted {actors.Count} spawners ({report["people_emitted"]} people) in {cellPath}");
+        w.WriteLine($"crowds: drawn-ground contact: {people} people within 5 cm (rotated world XY)");
         return 0;
     }
 
@@ -221,10 +282,19 @@ internal static class CrowdEmission
         string targetCell = o.Named.GetValueOrDefault("cell", Template);
         var cell = new LegacyPackage(HostPaths.Resolve(legacy, targetCell));
         var report = JsonNode.Parse("""{"mode":"dr2_spots","spots":[{"ue_cm":[1000,2000,3000]},{"ue_cm":[-4000,5000,6000]}]}""")!.AsObject();
-        Emit(cell, legacy, o.Usmap, Toml.Load(StageBuild.VisualsToml), report, [new(0, 0, 0), new(10000, 0, 0)]);
+        report["spots"]!.AsArray().Add(new JsonObject { ["ue_cm"] = new JsonArray(50000.0, 50000.0, 0.0) });
+        report["spots"]!.AsArray().Add(new JsonObject { ["ue_cm"] = new JsonArray(35000.0, 0.0, 0.0) });
+        var ground = new Visuals.TopSurface();
+        ground.Add(new(-10000, -10000, 1000), new(20000, -10000, 4000), new(-10000, 20000, 2500));
+        ground.Add(new(20000, -10000, 4000), new(20000, 20000, 5500), new(-10000, 20000, 2500));
+        ground.Add(new(30000, -5000, 0), new(40000, -5000, 10000), new(30000, 5000, 0));
+        ground.Add(new(40000, -5000, 10000), new(40000, 5000, 10000), new(30000, 5000, 0));
+        Emit(cell, legacy, o.Usmap, Toml.Load(StageBuild.VisualsToml), report, [new(0, 0, 0), new(10000, 0, 0)], ground);
+        if (report["actors_emitted"]!.GetValue<int>() != 2 || report["rejected_no_drawn_ground"]!.GetValue<int>() != 1
+            || report["rejected_slope"]!.GetValue<int>() != 1) throw new InvalidDataException("crowds: slope/missing-ground rejection fixture failed");
         cell.SaveTo(Path.Combine(output, targetCell + ".umap"));
         CopyBlueprint(legacy, output);
-        Check(output, targetCell, o.Usmap, report, Console.Out);
+        Check(output, targetCell, o.Usmap, report, Console.Out, ground);
         Console.WriteLine("PASS crowds native clone: two actors, eight components, remapped references and root placement");
         return 0;
     }
