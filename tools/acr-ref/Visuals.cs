@@ -820,6 +820,15 @@ internal static class Visuals
             ((JsonObject)r["instancing"]!)["keep_placeholders"] = keepMics.Count;
             Console.WriteLine($"visuals: instancing: {keepMics.Count} placeholder sections keep the instanced meshes' materials imported");
         }
+        var (coverSections, coverReport) = GroundCover.Build(ir, pl, cfg, inPhysicsBounds, dr2);
+        foreach (var (texture, section) in coverSections)
+        {
+            int at = Enumerable.Range(0, sectionNames.Count).FirstOrDefault(i => sectionNames[i]!.GetValue<string>() == "vista", sectionNames.Count);
+            sections.Insert(at, section);
+            mats.Insert(at, MatPath(dr2!.LeafMic("ground_cover_" + texture, dr2.Texture(texture))));
+            sectionNames.Insert(at, "ground_cover:" + texture);
+        }
+        r["ground_cover"] = coverReport;
         r["sections"] = sectionNames;
         r["triangles_total"] = sections.Sum(s => s.Idx.Count / 3);
         // objects carry DR2 normal maps: tangents along their UVs (the writer's default only follows the normal)
@@ -1109,6 +1118,12 @@ internal static class Visuals
         long tris = secs.Sum(s => (long)s.Idx.Count / 3);
         double budget = cfg.Num("objects", "max_total_triangles");
         C(tris <= budget, $"visuals: {tris} triangles in total (budget {budget:0})");
+        if (visualsReport?["ground_cover"] is { } cover && secNames is { } coverNames)
+        {
+            long coverTris = Enumerable.Range(0, secs.Count).Where(i => coverNames[i].StartsWith("ground_cover:")).Sum(i => (long)secs[i].Idx.Count / 3);
+            C(coverTris == cover["triangles"]!.GetValue<int>() && coverTris <= (cover["triangle_budget"]?.GetValue<int>() ?? 0),
+                $"ground cover: {coverTris} triangles match report and stay within budget");
+        }
 
         // road corridor: nothing drawn may stand in the road unless a collider is there too (over road surface).
         //   car height (car_height_min_m .. car_height_max_m): solid object sections at most to the collider limit
@@ -1146,7 +1161,7 @@ internal static class Visuals
                     C(true, $"visuals road corridor: {name} {secs[i].Idx.Count / 3} triangles of an overhead structure on its own colliders, not held to the limit");
                     continue;
                 }
-                bool soft = name == "objects:soft" || name.StartsWith("objects:" + VisualObjects.CardPrefix), isPosts = name == "posts";
+                bool soft = name == "objects:soft" || name.StartsWith("objects:" + VisualObjects.CardPrefix) || name.StartsWith("ground_cover:"), isPosts = name == "posts";
                 double limit = isPosts ? cfg.Num("markers", "post_width_m") * 75 : soft ? 0 : probe.MaxPen + tol;
                 var s = secs[i];
                 double deepest = 0, deepestHigh = 0; int over = 0, high = 0, unexplained = 0;

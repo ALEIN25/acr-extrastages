@@ -40,7 +40,7 @@ internal static partial class StageTextures
         refs = refs.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
 
         var files = refs.Where(r => r.IndexOf('#') > 0).SelectMany(r => r[..r.IndexOf('#')].Split('|'))
-            .Append("tracksplit.pssg")
+            .Append("tracksplit.pssg").Append("ground_cover.pssg")
             .Concat(install.List($"{st.RouteDir}/").Concat(install.List($"{st.LocDir}/"))
                 .Where(p => p.EndsWith(".pssg", StringComparison.OrdinalIgnoreCase)
                             // patchup_ot.pssg (location) and route_patchup_ot.pssg (route, game_2_1.dat): the full textures that

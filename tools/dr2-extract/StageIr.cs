@@ -275,6 +275,18 @@ internal static partial class StageIr
             }
         }
 
+        // Ground-cover prototypes have their own materials, absent from tracksplit/objects. Export separately so
+        // stage-textures can resolve their diffuse/opacity maps. grass.grs density/placement is still undecoded.
+        var coverSource = $"{locDir}/ground_cover.pssg";
+        if (options.Render && install.Exists(coverSource))
+        {
+            var cover = PssgCommands.Open(await install.FetchAsync(coverSource));
+            var coverGlb = Path.Combine(outDir, "render", "ground_cover.glb");
+            var coverResult = PssgMeshExport.Export(cover, coverGlb, null);
+            File.WriteAllText(Path.ChangeExtension(coverGlb, ".materials.json"), JsonSerializer.Serialize(coverResult.Materials, Json.Options));
+            Console.WriteLine($"ground cover source: {coverSource}, {coverResult.Materials.Count} materials, {coverResult.Triangles} prototype triangles (grass.grs not decoded)");
+        }
+
         object? groundBake = null;
         if (options.Bake is not null)
         {

@@ -285,9 +285,18 @@ drive_m = 12
 min_area_m2 = 0.5
 
 [crowds]
-# dr2_spots currently plans/exports crowd:spot:* preview markers only; native actor
-# emission needs an inspected BC_CrowdSystemSpawnerBakedActor template. See docs/crowds.md.
-mode = "off" # off | dr2_spots
+# Clone native baked crowd groups at accepted DR2 spectator spots. See docs/crowds.md.
+mode = "dr2_spots" # off | dr2_spots
+max_spawners = 40 # per gameplay cell; each native template group contains four people
+
+[ground_cover]
+mode = "scatter"              # off | scatter (grass-class collision terrain) | ornaments (plant anchors from IR)
+density = 1.5             # candidate plants per projected m2; rejected outside the road-edge band
+max_distance_m = 10        # entire footprint 2..this many metres outside the authored road edge; range 2..40
+triangle_budget = 480000    # per gameplay cell, 8 triangles per crossed pair, including sky-lit reverse faces
+textures = ["gc_billboard_d", "gc_clutter_d"]             # optional diffuse DDS stems; otherwise discover grass/fern/flower/weed/plant maps in render/*.materials.json
+# Requires --visuals-dr2 1 --visuals-textured 1. No collision. Missing plant textures log a zero-triangle skip.
+# New stage-ir --render exports ground_cover.pssg materials for stage-textures. grass.grs remains undecoded.
 
 [ornaments]
 # round 2b: DR2's ornament rocks (stage.json "ornaments", stage-ir --ornament-*; render/ornaments.glb), drawn as visuals only (their

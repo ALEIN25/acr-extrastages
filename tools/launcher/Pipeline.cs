@@ -381,6 +381,8 @@ internal sealed class Pipeline
         {
             (@"acr\Content\Environments\WalesS4HafrenSouth\DataAssets\DA_WalesS4HafrenSouthBakedData", null),
             (@"acr\Content\Levels\WalesS4HafrenSouth\_Generated_\22VG0QIP9ATUQI633K86KWPFP", null),
+            (@"acr\Content\Levels\WalesS4HafrenSouth\_Generated_\0SEKWS6594N5CV2V6D2XLJYYI", null), // crowd graph template
+            (@"acr\Content\Data\Crowd\Blueprints\BC_CrowdSystemSpawnerBakedActor", null),
             (@"acr\Content\Data\Database\Main\TrackSelection\DT_TracksVariants", null),
             (@"acr\Content\Data\Pacenote\Tables\DT_PacenoteHafrenSouthForward", null),
             (@"acr\Content\Levels\WalesS4HafrenSouth\_Generated_\7FF9A0XR2HIRJVFZU6AEAFHMU", null),   // reverse variant (pairs)

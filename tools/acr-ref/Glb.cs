@@ -1,11 +1,12 @@
 using System.Buffers.Binary;
 using System.Text;
 using System.Text.Json.Nodes;
+using System.Numerics;
 
 namespace AcrRef;
 
 /// Minimal binary glTF reader: triangle primitives with POSITION and indices, by material name.
-/// Node transforms are not applied (stage IR glbs have them baked into the vertices).
+/// Primitives reads baked stage geometry; NodePrimitives applies scene transforms for prototype assets.
 internal sealed class Glb
 {
     public JsonNode Json { get; }
@@ -40,10 +41,10 @@ internal sealed class Glb
         _bin = bin ?? [];
     }
 
-    public IEnumerable<Primitive> Primitives(bool withUv = false)
+    public IEnumerable<Primitive> Primitives(bool withUv = false, int? meshIndex = null)
     {
         var materials = Json["materials"]?.AsArray();
-        foreach (var mesh in Json["meshes"]?.AsArray() ?? [])
+        foreach (var mesh in (Json["meshes"]?.AsArray() ?? []).Where((_, i) => meshIndex is null || i == meshIndex))
             foreach (var prim in mesh?["primitives"]?.AsArray() ?? [])
             {
                 int mode = prim!["mode"]?.GetValue<int>() ?? 4;
@@ -58,8 +59,70 @@ internal sealed class Glb
                 float[]? col = withUv && prim["attributes"]!["COLOR_0"] is { } ca && Json["accessors"]![ca.GetValue<int>()]!["type"]!.GetValue<string>() == "VEC4"
                     ? ReadFloats(ca.GetValue<int>(), 4) : null;
                 float[]? nrm = withUv && prim["attributes"]!["NORMAL"] is { } na ? ReadFloats(na.GetValue<int>(), 3) : null;
-                yield return new Primitive(mesh["name"]?.GetValue<string>() ?? "", mat, pos, idx) { Uv = uv, Color = col, Normal = nrm };
+                yield return new Primitive(mesh!["name"]?.GetValue<string>() ?? "", mat, pos, idx) { Uv = uv, Color = col, Normal = nrm };
             }
+    }
+
+    /// Scene node instances with hierarchy transforms, for assets whose transforms are not baked.
+    public IEnumerable<(int Node, Primitive Primitive)> NodePrimitives()
+    {
+        var nodes = Json["nodes"]?.AsArray();
+        if (nodes is null || nodes.Count == 0)
+        {
+            int i = 0;
+            foreach (var group in Primitives(true).GroupBy(p => p.Mesh))
+            { foreach (var p in group) yield return (i, p); i++; }
+            yield break;
+        }
+        var children = nodes.SelectMany(n => n?["children"]?.AsArray() ?? []).Select(n => n!.GetValue<int>()).ToHashSet();
+        var scene = Json["scenes"]?[Json["scene"]?.GetValue<int>() ?? 0];
+        var roots = scene?["nodes"]?.AsArray().Select(n => n!.GetValue<int>())
+            ?? Enumerable.Range(0, nodes.Count).Where(i => !children.Contains(i));
+        foreach (int root in roots)
+            foreach (var p in Visit(root, Matrix4x4.Identity, new HashSet<int>())) yield return p;
+
+        IEnumerable<(int, Primitive)> Visit(int index, Matrix4x4 parent, HashSet<int> path)
+        {
+            if (!path.Add(index)) throw new InvalidDataException("glb node cycle");
+            var node = nodes[index]!;
+            float[] Values(string key, float[] fallback) => node[key]?.AsArray().Select(v => v!.GetValue<float>()).ToArray() ?? fallback;
+            Matrix4x4 local;
+            if (node["matrix"] is not null)
+            {
+                var a = Values("matrix", []);
+                local = new(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11], a[12], a[13], a[14], a[15]);
+            }
+            else
+            {
+                var s = Values("scale", [1, 1, 1]); var r = Values("rotation", [0, 0, 0, 1]); var t = Values("translation", [0, 0, 0]);
+                local = Matrix4x4.CreateScale(s[0], s[1], s[2]) * Matrix4x4.CreateFromQuaternion(new(r[0], r[1], r[2], r[3])) * Matrix4x4.CreateTranslation(t[0], t[1], t[2]);
+            }
+            var world = local * parent;
+            if (node["mesh"] is { } mesh)
+            {
+                if (!Matrix4x4.Invert(world, out var inverse)) throw new InvalidDataException("singular glb node transform");
+                var normalMatrix = Matrix4x4.Transpose(inverse);
+                foreach (var p in Primitives(true, mesh.GetValue<int>()))
+                {
+                    var pos = (float[])p.Positions.Clone(); var normal = p.Normal is null ? null : (float[])p.Normal.Clone();
+                    for (int i = 0; i < pos.Length; i += 3)
+                    {
+                        var v = Vector3.Transform(new(pos[i], pos[i + 1], pos[i + 2]), world);
+                        pos[i] = v.X; pos[i + 1] = v.Y; pos[i + 2] = v.Z;
+                        if (normal is null) continue;
+                        var n = Vector3.TransformNormal(new(normal[i], normal[i + 1], normal[i + 2]), normalMatrix);
+                        normal[i] = n.X; normal[i + 1] = n.Y; normal[i + 2] = n.Z;
+                    }
+                    var indices = (uint[])p.Indices.Clone();
+                    if (world.GetDeterminant() < 0)
+                        for (int i = 0; i < indices.Length; i += 3) (indices[i + 1], indices[i + 2]) = (indices[i + 2], indices[i + 1]);
+                    yield return (index, p with { Positions = pos, Normal = normal, Indices = indices });
+                }
+            }
+            foreach (var child in node["children"]?.AsArray() ?? [])
+                foreach (var p in Visit(child!.GetValue<int>(), world, path)) yield return p;
+            path.Remove(index);
+        }
     }
 
     (int offset, int stride, int count) View(int accessor, int elemSize)

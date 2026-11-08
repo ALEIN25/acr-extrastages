@@ -36,6 +36,7 @@ internal static class Program
                 "schema" => Schema.Run(opts),
                 "stage-selftest" => StageSelfTest.Run(opts),
                 "crowds-selftest" => Crowds.SelfTest(),
+                "crowds-native-selftest" => CrowdEmission.SelfTest(opts),
                 "stage-build" => StageBuild.Run(opts),
                 "stage-check" => StageBuild.RunCheck(opts),
                 "stage-verify" => StageVerify.Run(opts),
@@ -45,6 +46,7 @@ internal static class Program
                 "ground-at" => HeightSurvey.GroundAt(opts),
                 "procmesh-probe" => ProcMesh.Probe(opts),
                 "procmesh-selftest" => ProcMeshSelfTest.Run(),
+                "ground-cover-selftest" => GroundCoverSelfTest.Run(),
                 "export-info" => ExportInfo(opts),
                 "scenery-survey" => Scenery.Survey(opts),
                 "scenery-actor-slots" => Scenery.ActorSlots(opts),
@@ -81,6 +83,7 @@ internal static class Program
           acr-ref list        [--filter <regex>] [--out <file>]
           acr-ref export      <package-path> [--out <file.json>]
           acr-ref crowds-selftest   (synthetic crowd spot placement checks; no game data)
+          acr-ref crowds-native-selftest --legacy <root> --usmap <file> --out <scratch dir>
           acr-ref export-many --filter <regex> --out <dir> [--limit N]
           acr-ref raw         <package-path> --out <dir>
           acr-ref baked-summary <exported BakedDataContainer .json> [--out <dir>]

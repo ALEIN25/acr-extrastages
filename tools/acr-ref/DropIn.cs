@@ -661,7 +661,7 @@ internal sealed class Dr2Materials
         return MaskedMic("card_" + cardDds, CardTexture(cardDds), CardNormal(cardDds));
     }
 
-    string LeafMic(string name, string colour)
+    public string LeafMic(string name, string colour)
     {
         // Flat RG normal and constant roughness in both remaining channels.
         var pixels = Enumerable.Range(0, 16).SelectMany(_ => new byte[] { 128, 128, 255, 255 }).ToArray();

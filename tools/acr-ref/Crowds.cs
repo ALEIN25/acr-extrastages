@@ -4,8 +4,7 @@ using static AcrRef.Splines;
 
 namespace AcrRef;
 
-/// Candidate spectator spots only. Native actor serialization is deliberately deferred until a
-/// BC_CrowdSystemSpawnerBakedActor template and its component/reference graph can be inspected.
+/// Candidate spectator spots. CrowdEmission clones the native spawner graph at accepted positions.
 internal static class Crowds
 {
     const double ClearanceCm = 400;
@@ -62,11 +61,11 @@ internal static class Crowds
                 ["road_clearance_m"] = clearance.clearance / 100,
             });
         }
-        Console.WriteLine($"crowds: dr2_spots: {candidates} candidates, {spots.Count} spots, {near} rejected within 4 m of road edge, {outside} out of bounds, {duplicates} duplicates; actors emitted 0 (native template unavailable)");
+        Console.WriteLine($"crowds: dr2_spots: {candidates} candidates, {spots.Count} spots, {near} rejected within 4 m of road edge, {outside} out of bounds, {duplicates} duplicates");
         if (candidates == 0) Console.WriteLine("crowds: no spectator templates in IR objects/ornaments; crowd_*.bin is not exported by stage-ir");
         return new JsonObject
         {
-            ["mode"] = "dr2_spots", ["status"] = "spots_only_native_template_required", ["actors_emitted"] = 0,
+            ["mode"] = "dr2_spots", ["status"] = "planned", ["actors_emitted"] = 0,
             ["min_road_clearance_m"] = ClearanceCm / 100, ["candidates"] = candidates,
             ["rejected_road_clearance"] = near, ["rejected_bounds"] = outside, ["duplicates"] = duplicates,
             ["spots"] = spots,

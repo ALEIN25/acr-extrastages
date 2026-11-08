@@ -257,7 +257,7 @@ internal static class StageBuild
         File.WriteAllText(reportPath, report.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
         Console.WriteLine($"report -> {reportPath}");
 
-        int failures = Check(outRoot, ir, pl, hostColliders, Console.Out, report);
+        int failures = Check(outRoot, ir, pl, hostColliders, Console.Out, report, o.Usmap);
         return failures == 0 ? 0 : 5;
     }
 
@@ -821,8 +821,10 @@ internal static class StageBuild
         {
             var vopt = Visuals.Options.From(o.Named);
             var vcfg = Toml.Load(visualsCfg);
-            r["crowds"] = Crowds.Plan(visualsIr, pl, vcfg, road, p =>
+            r["crowds"] = Crowds.Plan(ir, pl, vcfg, road, p =>
                 InPhysicsBounds(new V3(p.X / 100, p.Z / 100, p.Y / 100)) && p.Z / 100 >= PhysMinY && p.Z / 100 <= PhysMaxY);
+            CrowdEmission.Emit(cell, legacy, o.Usmap, vcfg, (JsonObject)r["crowds"]!, centre);
+            if (r["crowds"]!["actors_emitted"]!.GetValue<int>() > 0) CrowdEmission.CopyBlueprint(legacy, outRoot);
             if (vopt.Dr2) dr2 ??= new Dr2Materials(vcfg, visualsIr.Dir, legacy, outRoot, packageRoot);
             r["visuals"] = Visuals.Build(cell, visualsIr, pl, vcfg, vopt, objectShapes, InPhysicsBounds, vopt.Dr2 ? dr2 : null);
         }
@@ -1048,14 +1050,17 @@ internal static class StageBuild
             p["world"] is { } wn ? World.FromJson(wn) : null);
         if (pl.World is not null) UseWorld(pl.World);
         using var w = o.Out is null ? Console.Out : new StreamWriter(o.Out);
-        int failures = Check(Need(o, "legacy"), ir, pl, report["host_collider_count"]!.GetValue<int>(), w, report);
+        int failures = Check(Need(o, "legacy"), ir, pl, report["host_collider_count"]!.GetValue<int>(), w, report, o.Usmap);
         return failures == 0 ? 0 : 5;
     }
 
-    static int Check(string root, Ir ir, Placement pl, int hostCount, TextWriter w, JsonNode report)
+    static int Check(string root, Ir ir, Placement pl, int hostCount, TextWriter w, JsonNode report, string usmap)
     {
         Advisory.Load(report["options"]?["visuals"]?.GetValue<string>());
         int failures = 0;
+        foreach (var (key, cellPath) in new[] { ("cell", HostPaths.Cell), ("reverse_cell", HostPaths.Reverse.Cell) })
+            if (report[key]?["crowds"] is { } crowds)
+                failures += CrowdEmission.Check(root, cellPath, usmap, crowds, w);
         void C(bool ok, string what) { w.WriteLine($"{Advisory.Verdict(ok, what, out var bad)} {what}"); if (bad) failures++; }
 
         bool additive = report["options"]?["additive"]?.GetValue<bool>() == true;
