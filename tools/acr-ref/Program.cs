@@ -35,6 +35,7 @@ internal static class Program
                 "xref" => Xref.Run(opts),
                 "schema" => Schema.Run(opts),
                 "stage-selftest" => StageSelfTest.Run(opts),
+                "crowds-selftest" => Crowds.SelfTest(),
                 "stage-build" => StageBuild.Run(opts),
                 "stage-check" => StageBuild.RunCheck(opts),
                 "stage-verify" => StageVerify.Run(opts),
@@ -79,6 +80,7 @@ internal static class Program
         usage:
           acr-ref list        [--filter <regex>] [--out <file>]
           acr-ref export      <package-path> [--out <file.json>]
+          acr-ref crowds-selftest   (synthetic crowd spot placement checks; no game data)
           acr-ref export-many --filter <regex> --out <dir> [--limit N]
           acr-ref raw         <package-path> --out <dir>
           acr-ref baked-summary <exported BakedDataContainer .json> [--out <dir>]

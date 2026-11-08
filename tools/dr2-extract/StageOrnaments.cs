@@ -106,6 +106,9 @@ internal static partial class StageIr
         if (instances.Count == 0)
         {
             Console.WriteLine($"ornaments: 0 instances kept ({records} records in {sources.Count} files)");
+            Console.WriteLine($"ornaments: corridor {options.OrnamentCorridor} m, filter /{options.OrnamentFilter}/; {unresolved} unresolved hashes, {inEns} already in objects.ens");
+            foreach (var (name, n) in excluded.OrderByDescending(kv => kv.Value).Take(40))
+                Console.WriteLine($"  ornaments excluded by filter: {name}: {n}");
             return null;
         }
 

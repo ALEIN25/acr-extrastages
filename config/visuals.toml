@@ -284,6 +284,11 @@ band_m = 2.5
 drive_m = 12
 min_area_m2 = 0.5
 
+[crowds]
+# dr2_spots currently plans/exports crowd:spot:* preview markers only; native actor
+# emission needs an inspected BC_CrowdSystemSpawnerBakedActor template. See docs/crowds.md.
+mode = "off" # off | dr2_spots
+
 [ornaments]
 # round 2b: DR2's ornament rocks (stage.json "ornaments", stage-ir --ornament-*; render/ornaments.glb), drawn as visuals only (their
 # collision is already in DR2's ground / object colliders), before the physics fill so that only fills what the rocks do not cover

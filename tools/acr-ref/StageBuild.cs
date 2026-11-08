@@ -821,6 +821,8 @@ internal static class StageBuild
         {
             var vopt = Visuals.Options.From(o.Named);
             var vcfg = Toml.Load(visualsCfg);
+            r["crowds"] = Crowds.Plan(visualsIr, pl, vcfg, road, p =>
+                InPhysicsBounds(new V3(p.X / 100, p.Z / 100, p.Y / 100)) && p.Z / 100 >= PhysMinY && p.Z / 100 <= PhysMaxY);
             if (vopt.Dr2) dr2 ??= new Dr2Materials(vcfg, visualsIr.Dir, legacy, outRoot, packageRoot);
             r["visuals"] = Visuals.Build(cell, visualsIr, pl, vcfg, vopt, objectShapes, InPhysicsBounds, vopt.Dr2 ? dr2 : null);
         }

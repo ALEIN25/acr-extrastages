@@ -186,7 +186,17 @@ internal static class Preview
         Cam("before the finish", finishIdx - 6);
         var route = new JsonArray((ir.PreviewRoute ?? ir.Centre.Select(pl.ToUe).ToList()).Select(g => { var p = Td(g); return (JsonNode)new JsonArray(Math.Round(p.X, 1), Math.Round(p.Y, 1), Math.Round(p.Z, 1)); }).ToArray());
         var markers = new JsonArray();
-        foreach (var item in ir.PreviewMarkers) { var q = Td(item.Value); markers.Add(new JsonObject { ["name"] = item.Key, ["pos"] = new JsonArray(q.X,q.Y,q.Z) }); }
+        foreach (var item in ir.PreviewMarkers)
+        {
+            var q = Td(item.Value);
+            var marker = new JsonObject { ["name"] = item.Key, ["pos"] = new JsonArray(q.X,q.Y,q.Z) };
+            if (item.Key.StartsWith("crowd:spot:", StringComparison.Ordinal))
+            {
+                marker["kind"] = "crowd_spot";
+                marker["runtime_actor"] = false; // spot planning is available before native actor emission
+            }
+            markers.Add(marker);
+        }
         if (ir.PreviewMarkers.TryGetValue("finish", out var finish)) {
             var q = Td(finish); var path = ir.PreviewRoute!;
             int i = Enumerable.Range(0,path.Count).MinBy(i => (path[i]-finish).Length);
