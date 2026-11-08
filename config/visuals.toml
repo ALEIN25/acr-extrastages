@@ -6,7 +6,7 @@
 surfaces = ["GD0+", "CATG"]
 
 [markers]
-spacing_m = 15          # edge posts along both gate edges
+spacing_m = 0           # edge posts along both gate edges every spacing_m (0 = none: an early driving guide, DR2's own roadside objects are drawn now)
 post_width_m = 0.3
 post_height_m = 1.2
 gate_height_m = 5       # start / finish gate posts and banner
@@ -20,7 +20,12 @@ posts = "/Game/Data/Gameplay/PhysicalMaterials/MI_WallMetalPole"
 gates = "/Game/Data/Gameplay/PhysicalMaterials/MI_SurfaceGrass"
 
 [objects]
+precise_colliders = 1
+precise_cell_m = 0.5
+precise_band_m = 2.5
+precise_max_boxes = 24
 enclosed_interior = 1
+enclosed_min_coverage = 0.7   # share of a fitted box outline (at two of five heights 0.5-2.5 m) that the object's own drawn surfaces must cover or shield before its stand-in is dropped (cars: wheel arches, porches); InvisibleCheck still checks independently
 fit_colliders_to_mesh = 1
 fit_colliders_max_cm = 100
 # only used when stage-build also gets --objects (v1.3): the solid DR2 objects (the colliders written to BakedData)

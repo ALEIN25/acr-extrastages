@@ -182,6 +182,7 @@ internal static class VisualObjects
         var treeClasses = cfg.Arr("objects", "tree_shape_classes").Cast<string>().ToHashSet();
         int instances = 0, outside = 0, noMesh = 0, meshInstances = 0, proxyInstances = 0, notSolid = 0, treeInstances = 0;
         int boxesFitted = 0, boxesKept = 0;
+        int preciseReplaced = 0, preciseBoxes = 0, preciseKept = 0;
         bool fitBoxes = cfg["objects"].TryGetValue("fit_colliders_to_mesh", out var fb) && fb is double fbd && fbd != 0;
         double fitMax = cfg["objects"].TryGetValue("fit_colliders_max_cm", out var boxFitMaxValue) && boxFitMaxValue is double fmd ? fmd : 100;
         int alignChecked = 0, misaligned = 0, crownsDrawn = 0, crownsDropped = 0, staticDrawn = 0;
@@ -493,10 +494,29 @@ internal static class VisualObjects
                         if (ColliderFit.FitBox(shape, vertices, fitMax))
                         {
                             boxesFitted++;
-                            shape.EnclosedFittedInterior = cfg.Num("objects", "enclosed_interior") != 0 &&
-                                ColliderFit.EnclosedBox(shape, mesh.Idx.Select(i => Ue(Vector3.Transform(mesh.Pos[i], m))).ToArray());
                         }
                         else boxesKept++;
+                }
+                // Enclosure is independent of whether the bounded shrink was accepted.
+                // Test the retained shape against this instance's actual mesh either way.
+                if (cfg.Num("objects", "enclosed_interior") != 0)
+                {
+                    var triangles = mesh.Idx.Select(i => Ue(Vector3.Transform(mesh.Pos[i], m))).ToArray();
+                    double coverage = cfg["objects"].TryGetValue("enclosed_min_coverage", out var emc) && emc is double emcd ? emcd : 0.9;
+                    foreach (var shape in shapes.Where(s => s.Box is not null))
+                        shape.EnclosedFittedInterior = ColliderFit.EnclosedBox(shape, triangles, coverage);
+                }
+                if (cfg.Num("objects", "precise_colliders") != 0 && objs.PreciseFitted.Add(inst["id"]!.GetValue<string>()))
+                {
+                    var triangles = mesh.Idx.Select(i => Ue(Vector3.Transform(mesh.Pos[i], m))).ToArray();
+                    foreach (var shape in shapes.ToArray().Where(s => s.Box is not null && !s.EnclosedFittedInterior))
+                    {
+                        var replacements = PreciseColliders.Split(shape, triangles, cfg.Num("objects", "precise_cell_m") * 100, cfg.Num("objects", "precise_band_m") * 100, (int)cfg.Num("objects", "precise_max_boxes"));
+                        if (replacements is null) { preciseKept++; continue; }
+                        objs.Kept.Remove(shape); objs.Kept.AddRange(replacements);
+                        shapes.Remove(shape); shapes.AddRange(replacements);
+                        preciseReplaced++; preciseBoxes += replacements.Count;
+                    }
                 }
                 var cls = shapes.GroupBy(s => ClassOf(s.Material)).OrderByDescending(g => g.Count()).First().Key;
                 if (dr2Material is null) AddMesh(sec[cls], mesh, m, pl, Ue);
@@ -512,7 +532,7 @@ internal static class VisualObjects
                     alignChecked++;
                     // a collider reaching past the drawn mesh (cables, logs) would be invisible there: draw it too
                     var (smn, smx) = ColliderBounds(s);
-                    if (smn.X < bmn.X - 30 || smx.X > bmx.X + 30 || smn.Y < bmn.Y - 30 || smx.Y > bmx.Y + 30 || smx.Z > bmx.Z + 30) DrawShape(s);
+                    if (!s.EnclosedFittedInterior && (smn.X < bmn.X - 30 || smx.X > bmx.X + 30 || smn.Y < bmn.Y - 30 || smx.Y > bmx.Y + 30 || smx.Z > bmx.Z + 30)) DrawShape(s);
                     if (ctr.X < bmn.X - 100 || ctr.X > bmx.X + 100 || ctr.Y < bmn.Y - 100 || ctr.Y > bmx.Y + 100 || ctr.Z < bmn.Z - 100 || ctr.Z > bmx.Z + 100)
                         misaligned++;
                 }
@@ -592,6 +612,7 @@ internal static class VisualObjects
 
         foreach (var s in sec.Values)
             for (int i = 0; i < s.Nrm.Count; i++) s.Nrm[i] = s.Nrm[i] == Vector3.Zero ? Vector3.UnitZ : Vector3.Normalize(s.Nrm[i]);
+        Console.WriteLine($"objects: precise colliders: {preciseReplaced} boxes replaced by {preciseBoxes} boxes, {preciseKept} kept");
         Console.WriteLine($"objects: colliders fitted to render meshes: {boxesFitted} fitted, {boxesKept} kept (maximum shrink {fitMax:0} cm per side)");
         var r = new JsonObject
         {

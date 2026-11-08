@@ -16,7 +16,7 @@ namespace AcrRef;
 internal static class ColliderFit
 {
     // Test the actual instance mesh at two car heights; roof/floor coverage cannot pass this test.
-    internal static bool EnclosedBox(ObjectColliders.Shape shape, V3[] triangles)
+    internal static bool EnclosedBox(ObjectColliders.Shape shape, V3[] triangles, double minCoverage = 0.9)
     {
         if (shape.Box is not { } b) return false;
         var (x, y, z) = ObjectColliders.RotationAxes(b.Rot[0], b.Rot[1], b.Rot[2]);
@@ -62,7 +62,7 @@ internal static class ColliderFit
                     })) covered++;
                 }
             }
-            if (covered >= total * 0.9) goodHeights++;
+            if (covered >= total * minCoverage) goodHeights++;
         }
         return goodHeights >= 2;
     }

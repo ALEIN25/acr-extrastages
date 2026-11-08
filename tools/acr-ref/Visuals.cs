@@ -167,7 +167,7 @@ internal static class Visuals
         var posts = new ProcMesh.Section(); var gates = new ProcMesh.Section();
         double next = 0; int postCount = 0;
         var postCentres = new JsonArray();
-        foreach (var g in ir.Gates)
+        foreach (var g in spacing > 0 ? ir.Gates : [])   // spacing_m = 0: no edge posts (DR2's own roadside objects are drawn)
         {
             if (g.distance < next) continue;
             next = g.distance + spacing;
@@ -179,6 +179,14 @@ internal static class Visuals
                 postCount++;
                 if (postCentres.Count < 4) postCentres.Add($"{basePt.X:0},{basePt.Y:0},{basePt.Z:0}");
             }
+        }
+        if (postCount == 0)
+        {
+            // no posts: one tiny triangle 50 m below the start gate keeps the section non-empty (as the dummy)
+            var s0 = pl.ToUe(ir.Gates[ir.Timing.First(t => t.type == "start").gate].crossing);
+            var p0 = new Vector3((float)s0.X, (float)s0.Y, (float)s0.Z - 5000);
+            foreach (var off in new[] { Vector3.Zero, new Vector3(1, 0, 0), new Vector3(0, 1, 0) }) { posts.Pos.Add(p0 + off); posts.Nrm.Add(Vector3.UnitZ); posts.Uv.Add(Vector2.Zero); }
+            posts.Idx.AddRange([0u, 2u, 1u]);
         }
         double gh = cfg.Num("markers", "gate_height_m") * 100;
         foreach (var type in new[] { "start", "finish" })
@@ -1134,7 +1142,7 @@ internal static class Visuals
         // posts: 20 vertices each, centred on a gate edge point
         double spacing = cfg.Num("markers", "spacing_m");
         var edges = new List<Vector2>(); double next = 0;
-        foreach (var g in ir.Gates)
+        foreach (var g in spacing > 0 ? ir.Gates : [])   // spacing_m = 0: no edge posts expected
         {
             if (g.distance < next) continue;
             next = g.distance + spacing;
@@ -1149,7 +1157,7 @@ internal static class Visuals
             worst = Math.Max(worst, (ctr - edges[k]).Length());
         }
         double width = ir.Gates.Average(g => Math.Sqrt(Math.Pow(g.left[0] - g.right[0], 2) + Math.Pow(g.left[2] - g.right[2], 2)));
-        C(count == edges.Count && posts.Pos.Count == count * 20 && worst < 1,
+        C(count == edges.Count && (posts.Pos.Count == count * 20 || count == 0 && posts.Pos.Count == 3) && worst < 1,
           $"visuals: {count} edge posts every {spacing} m on both gate edges (max offset {worst:0.00} cm; mean road width {width:0.0} m)");
 
         // ground: the terrain + road sections cover the placed DR2 centreline (road from the bake: section 2 + every road:<tile>)

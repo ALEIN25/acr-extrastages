@@ -20,10 +20,15 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   near the road use their real models too. Finland 01 r2 runs at about 80 FPS on the test PC.
 - Tree trunk and object colliders are fitted to their visible models, so no thick trunk pillars or
   collider boxes are drawn over trees, houses and vehicles that are walled in at car height.
+- Cars, vans and porches: oversized DiRT Rally 2.0 collision boxes are replaced by small boxes that
+  follow the visible model at car height, so no plain box is drawn over them.
 - A build check that fails a stage if something solid near the road cannot be seen. Colliders
   with nothing drawn on them are now drawn.
 
 ### Changed
+
+- The road-edge marker posts are gone (`[markers] spacing_m = 0`); the stage's own DiRT Rally 2.0
+  roadside objects are drawn instead.
 
 - Better-looking objects: tree trunks, collider-shaped objects (rocks, fences, barriers) and the
   road-edge posts now use textures from the stage's own DiRT Rally 2.0 files (bark, rock, wood,

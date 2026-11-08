@@ -152,6 +152,7 @@ internal static class ObjectColliders
         public JsonObject Report = new();
         public RoadProbe Probe = null!;
     public HashSet<string> RoadCodes = new();
+        public HashSet<string> PreciseFitted = new();
         public HashSet<string> RealFitted = new();   // DR2 instances whose capsules VisualObjects.Build already fitted to their real trunks (once per stage-build, both cells)
     }
 
