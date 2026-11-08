@@ -363,7 +363,7 @@ internal static class Visuals
             {
                 var tex = dr2!.HasTexture(key) ? key : dr2.TerrainTexture;   // a slice not extracted: the stage's ground texture
                 sr[key] = (tex == key ? "" : $"not extracted, on {tex}; ") + BoxUv(s, (float)(cfg.Num("dr2_textures", "terrain_tile_m") * 100));
-                var nrm = dr2.PairedNormal(tex) is { } nn ? dr2.NormalTexture(nn) : null;
+                var nrm = dr2.ProcNormalMaps && dr2.PairedNormal(tex) is { } nn ? dr2.NormalTexture(nn) : null;
                 bakeSections.Add(($"terrain:steep:{key}", s, MatPath(dr2.Mic("rock_" + tex, dr2.Texture(tex), nrm))));
             }
             dr2Rep["steep_rock"] = sr;
@@ -765,7 +765,7 @@ internal static class Visuals
                 bool rock = code.StartsWith("RBK") || code.StartsWith("ROK");
                 var tex = rock && rockTex is not null && dr2.HasTexture(rockTex) ? rockTex : dr2.TerrainTexture;
                 BoxUv(s, (float)(cfg.Num("dr2_textures", "terrain_tile_m") * 100));
-                var nrm = dr2.PairedNormal(tex) is { } nn ? dr2.NormalTexture(nn) : null;
+                var nrm = dr2.ProcNormalMaps && dr2.PairedNormal(tex) is { } nn ? dr2.NormalTexture(nn) : null;
                 sections.Add(s); mats.Add(MatPath(dr2.Mic("rock_" + tex, dr2.Texture(tex), nrm))); sectionNames.Add($"terrain:physics:{code}");
                 fr[code] = $"{s.Idx.Count / 6} triangles (both sides) on {tex}";
             }

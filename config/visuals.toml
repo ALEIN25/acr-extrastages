@@ -238,6 +238,7 @@ masked_mic_base_texture = "T_FraChaBldWarehouseAProps04_B"     # Texture Color/O
 masked_mic_orm_texture = "T_FraChaBldWarehouseAProps04_L"
 masked_mic_normal_texture = "T_FraChaBldWarehouseAProps04_N"
 object_normal_max_size = 1024                     # objects and class sections get their DR2 normal map (BC5) up to this size
+object_normal_maps = false       # DR2 normal maps on objects, bark and rock sections: false = flat (those sections have no UV tangents, so the maps lit them near black in game)
 masked_min_transparent = 0.05                    # share of texels with alpha < 0.5 above which a texture is drawn masked
 ground_detail_m = 1.5                             # one detail-normal repeat every this many metres
 ground_detail_strength = 1.5
