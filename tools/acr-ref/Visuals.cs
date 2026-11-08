@@ -597,9 +597,10 @@ internal static class Visuals
                     ? VisualObjects.ClipTris(tris, (float)cz).ToList() : tris;
             var colliders = (objects?.Kept ?? []).Select(s => (s, tris: CarHeight(s, InvisibleCheck.ColliderTriangles(s)), hull: new bool[1], lid: new bool[1])).Where(x => x.tris.Count > 0).ToList();
             int proxyShapes = 0, proxyTris = 0, proxyLids = 0;
+            Console.WriteLine($"visuals: proxies skipped for enclosed fitted colliders: {colliders.Count(x => x.s.EnclosedFittedInterior)}");
             double cellCm = inv.CellM * 100, cellArea = inv.CellM * inv.CellM;
             int minCells = Math.Max(1, (int)Math.Ceiling(inv.MinAreaM2 / cellArea));
-            static bool Woody(ObjectColliders.Shape s) => VisualObjects.ClassOf(s.Material) is "trunks" or "soft" or "wood"
+            static bool Woody(ObjectColliders.Shape s) => VisualObjects.ClassOf(s.Material) is "trunks" or "soft"   // "wood" alone (house walls, sheds, fences: PM_WallWood) is not a tree: neutral proxy, not bark
                 || System.Text.RegularExpressions.Regex.IsMatch(s.Template, "tree|bush|root|trunk|stump|log|grass|shrub|hedge|pohutukawa|hawthorn|birch|fir|pine|fern|flax|broom|gorse|branch", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
             // woody trunk proxies take their template's own bark (a "bark:" + texture section), else the trunks class
             string ProxyKey(ObjectColliders.Shape s, bool woody) => !woody ? "other"
@@ -651,7 +652,7 @@ internal static class Visuals
             foreach (var (a, b, c) in added) dg.AddGround(a, b, c);
             foreach (var (sh, tris, hull, lid) in colliders)
             {
-                if (lid[0]) continue;
+                if (lid[0] || sh.EnclosedFittedInterior) continue;
                 var flagged = Flagged(tris);
                 if (flagged.Count < minCells) continue;
                 bool woody = Woody(sh);
@@ -744,16 +745,30 @@ internal static class Visuals
             dr2Rep["packages"] = dr2.Log.DeepClone();
             r["dr2"] = dr2Rep;
         }
-        // [instancing]: the HISMs' materials are imported by the cell only when its merged mesh also uses them (in game a species' HISMs render only then),
-        // so each MIC of the instanced meshes (every LOD, the billboard) gets a zero-area triangle of its own, 50 m below the start gate (as the dummy)
+        // [instancing]: in game a species' HISMs render only when the merged mesh also DRAWS real triangles with its materials (build C: the cell drew
+        // the fir MICs and none of the birch/bare ones; only the firs' HISMs showed. Zero-area placeholders (build K) did not help). So each MIC of
+        // the instanced meshes (every LOD, the billboard) gets a small real tile, 8 cm square, both windings, stacked 2 cm off the road-facing side
+        // of the start gate's left post from 1.2 m up: visible from the car at the start, no collider.
         if (instancingPlan is not null)
         {
             var keepMics = instancingPlan.Species.Values.SelectMany(s => ((JsonArray)s.Report["materials"]!).Select(x => x!.GetValue<string>())).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToList();
+            var sg = ir.Gates[ir.Timing.First(t => t.type == "start").gate];
+            var gl = pl.ToUe(sg.left); var gr = pl.ToUe(sg.right);
+            var GL = new Vector3((float)gl.X, (float)gl.Y, (float)gl.Z); var GR = new Vector3((float)gr.X, (float)gr.Y, (float)gr.Z);
+            var across = GR - GL; across.Z = 0; across = Vector3.Normalize(across);
+            var along = Vector3.Cross(across, Vector3.UnitZ);
+            const float tile = 8, gap = 2, postHalf = 40;
+            int k = 0;
             foreach (var mic in keepMics)
             {
                 var keep = new ProcMesh.Section();
-                foreach (var off in new[] { Vector3.Zero, new Vector3(1, 0, 0), new Vector3(2, 0, 0) }) { keep.Pos.Add(d0 + off); keep.Nrm.Add(Vector3.UnitZ); keep.Uv.Add(Vector2.Zero); }
-                keep.Idx.AddRange([0u, 2u, 1u]);
+                int col = k % 3, row = k / 3; k++;
+                var o = GL + across * (postHalf + 2) + along * ((col - 1) * (tile + gap) - tile / 2) + new Vector3(0, 0, 120 + row * (tile + gap));
+                var q = new[] { o, o + along * tile, o + along * tile + new Vector3(0, 0, tile), o + new Vector3(0, 0, tile) };
+                var uv = new[] { new Vector2(0, 1), new Vector2(1, 1), new Vector2(1, 0), new Vector2(0, 0) };
+                foreach (var n in new[] { across, -across })
+                    for (int v = 0; v < 4; v++) { keep.Pos.Add(q[v]); keep.Nrm.Add(n); keep.Uv.Add(uv[v]); }
+                keep.Idx.AddRange([0u, 1u, 2u, 0u, 2u, 3u, 4u, 6u, 5u, 4u, 7u, 6u]);
                 sections.Add(keep); mats.Add(MatPath(mic)); sectionNames.Add("instancing:keep:" + mic[(mic.LastIndexOf('/') + 1)..]);
             }
             ((JsonObject)r["instancing"]!)["keep_placeholders"] = keepMics.Count;

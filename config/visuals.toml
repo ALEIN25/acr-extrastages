@@ -20,6 +20,9 @@ posts = "/Game/Data/Gameplay/PhysicalMaterials/MI_WallMetalPole"
 gates = "/Game/Data/Gameplay/PhysicalMaterials/MI_SurfaceGrass"
 
 [objects]
+enclosed_interior = 1
+fit_colliders_to_mesh = 1
+fit_colliders_max_cm = 100
 # only used when stage-build also gets --objects (v1.3): the solid DR2 objects (the colliders written to BakedData)
 enabled = 1
 max_mesh_triangles = 20000      # per instance (v1.12: was 4000, which drew parked cars, campers and vans as boxes); heavier render meshes
@@ -67,8 +70,17 @@ shape_min_fill = 0.8            # offline check: drawn shape bounds / collider b
 # round 3: trees whose origin is within near_m of the centreline are drawn with their real LOD0 mesh (foliage_trunk opaque, foliage
 # cut-out two-sided with its normal map) instead of cards + trunk stub, nearest first until near_max_triangles are used (budget);
 # farther trees keep the cards and a thin species-bark stub
-near_m = 10
-near_max_triangles = 90000
+near_m = 12
+fit_tree_colliders = 1   # fit the physics capsule of every tree with a real DR2 mesh (full, middle tier or card + stub; old key fit_real_tree_colliders still read) to its real trunk (ColliderFit): thin stub, no thick proxy hull; 0 = DR2 capsules; trees the fit leaves over [instancing] collider_gap_limit_cm keep theirs
+near_max_triangles = 100000000
+# round 3b, the middle tier: trees within mid_m that did not fit near_max_triangles are drawn with the same DR2 mesh, foliage thinned
+# to mid_ratio of its leaf cards (kept cards enlarged to keep the cover; trunk kept whole), nearest first until mid_max_triangles;
+# farther trees keep the cards and trunk stub. mid_m = 0: off
+mid_m = 25
+mid_ratio = 0.25
+mid_min_triangles = 24
+mid_max_triangles = 100000000
+bush_max_triangles = 100000000   # bushes (soft vegetation) within mid_m: thinned DR2 mesh from this separate budget, nearest first (0 = cards only)
 # triangles of a near tree reaching into the road corridor (any surface) beyond the objects' limits are left out first: of the budget about
 # three quarters is drawn (Fi: 48 trees, 65k triangles of 90k)
 card_brightness = 1.15          # far-tree cards: DR2's billboard strips read dark next to the real foliage; colour factor (1 = as DR2)

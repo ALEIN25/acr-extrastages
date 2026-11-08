@@ -29,7 +29,66 @@ internal static class VisualObjects
         _ => "other",
     };
 
-    sealed record Mesh(Vector3[] Pos, uint[] Idx, Vector3 Min, Vector3 Max, Vector2[] Uv, string[] TriMaterial, Dictionary<string, int> MatTris, string?[]? TreeMat = null);
+    sealed record Mesh(Vector3[] Pos, uint[] Idx, Vector3 Min, Vector3 Max, Vector2[] Uv, string[] TriMaterial, Dictionary<string, int> MatTris, string?[]? TreeMat = null, bool[]? TrunkTri = null);
+
+    /// Round 3b, the middle tier: a tree mesh with only its tree-material triangles, the foliage simplified once to `ratio` of its triangles
+    /// (GroundLod.SimplifyToCount, UV seams locked; at least minTris per material) and the trunk triangles kept whole (the drawn trunk is
+    /// what the invisible-obstacle check compares with the collider). Null when the mesh has no tree material.
+    static Mesh? MidMesh(Mesh mesh, double ratio, int minTris)
+    {
+        if (mesh.TreeMat is not { } tm) return null;
+        var pos = new List<Vector3>(); var idx = new List<uint>(); var uv = new List<Vector2>(); var triMat = new List<string>(); var treeMat = new List<string?>(); var trunk = new List<bool>();
+        var groups = Enumerable.Range(0, mesh.Idx.Length / 3).Where(t => tm[t] is not null).GroupBy(t => (key: tm[t]!, trunk: mesh.TrunkTri?[t] == true));
+        foreach (var g in groups)
+        {
+            // the group as its own small mesh (cm for the simplifier), vertices remapped
+            var map = new Dictionary<uint, uint>(); var gp = new List<Vector3>(); var gu = new List<Vector2>(); var gi = new List<uint>();
+            foreach (var t in g)
+                for (int k = 0; k < 3; k++)
+                {
+                    uint v = mesh.Idx[t * 3 + k];
+                    if (!map.TryGetValue(v, out var nv)) { map[v] = nv = (uint)gp.Count; gp.Add(mesh.Pos[v] * 100); gu.Add(mesh.Uv[v]); }
+                    gi.Add(nv);
+                }
+            int n = gi.Count / 3;
+            List<Vector3> sp = gp; List<uint> si = gi; List<Vector2> su = gu;
+            if (!g.Key.trunk && ratio < 1 && n > minTris)
+            {
+                // DR2 foliage is many separate leaf cards: an edge collapse cannot merge them (2645 -> 2123 at 0.25). So the cards are thinned:
+                // every connected piece is kept or dropped as a whole (evenly spread, deterministic), each kept piece scaled about its centre
+                // by sqrt(1/ratio) (at most 1.8) so the crown keeps about its cover. A group of few large pieces is collapsed as before
+                var parent = Enumerable.Range(0, gp.Count).ToArray();
+                int Find(int x) { while (parent[x] != x) x = parent[x] = parent[parent[x]]; return x; }
+                for (int t = 0; t < n; t++) { int a = Find((int)gi[t * 3]); foreach (var k in new[] { 1, 2 }) { int c = Find((int)gi[t * 3 + k]); if (c != a) parent[c] = a; } }
+                var pieces = Enumerable.Range(0, n).GroupBy(t => Find((int)gi[t * 3])).ToList();
+                if (pieces.Count >= 12)
+                {
+                    float scale = (float)Math.Min(1.8, Math.Sqrt(1 / ratio));
+                    var kp = new List<Vector3>(); var ku = new List<Vector2>(); var ki = new List<uint>();
+                    double acc = 0;
+                    foreach (var piece in pieces.OrderBy(p => gp[(int)gi[p.First() * 3]].Z).ThenBy(p => gp[(int)gi[p.First() * 3]].X))
+                    {
+                        acc += ratio; if (acc < 1) continue; acc -= 1;
+                        var vs = piece.SelectMany(t => new[] { gi[t * 3], gi[t * 3 + 1], gi[t * 3 + 2] }).Distinct().ToList();
+                        var ctr = vs.Aggregate(Vector3.Zero, (s, v) => s + gp[(int)v]) / vs.Count;
+                        var remap = new Dictionary<uint, uint>();
+                        foreach (var v in vs) { remap[v] = (uint)kp.Count; kp.Add(ctr + (gp[(int)v] - ctr) * scale); ku.Add(gu[(int)v]); }
+                        foreach (var t in piece) for (int k = 0; k < 3; k++) ki.Add(remap[gi[t * 3 + k]]);
+                    }
+                    if (ki.Count / 3 >= minTris) (sp, si, su) = (kp, ki, ku);
+                }
+                else (sp, si, su, _) = GroundLod.SimplifyToCount(gp, gi, gu, Math.Max(minTris, (int)Math.Ceiling(n * ratio)));
+            }
+            uint b = (uint)pos.Count;
+            pos.AddRange(sp.Select(v => v / 100)); uv.AddRange(su); idx.AddRange(si.Select(i => i + b));
+            int m = si.Count / 3;
+            triMat.AddRange(Enumerable.Repeat(g.Key.key, m)); treeMat.AddRange(Enumerable.Repeat<string?>(g.Key.key, m)); trunk.AddRange(Enumerable.Repeat(g.Key.trunk, m));
+        }
+        if (idx.Count == 0) return null;
+        var mn = new Vector3(float.MaxValue); var mx = new Vector3(float.MinValue);
+        foreach (var v in pos) { mn = Vector3.Min(mn, v); mx = Vector3.Max(mx, v); }
+        return new Mesh(pos.ToArray(), idx.ToArray(), mn, mx, uv.ToArray(), triMat.ToArray(), triMat.GroupBy(x => x).ToDictionary(x => x.Key, x => x.Count()), treeMat.ToArray(), trunk.ToArray());
+    }
 
     /// Prefix of the per-DR2-material sections (dr2Material): "dr2:" + the section key (glb material name, see Build).
     public const string Dr2Prefix = "dr2:";
@@ -82,11 +141,16 @@ internal static class VisualObjects
                 matTris[p.Material] = matTris.GetValueOrDefault(p.Material) + p.Indices.Length / 3;
             }
             // round 3: the section key of each triangle's foliage_trunk / foliage material (null: not a tree material)
-            string?[]? treeMat = null;
+            string?[]? treeMat = null; bool[]? trunkTri = null;
             if (treeMaterial is not null)
             {
                 var tk = matTris.ToDictionary(kv => kv.Key, kv => treeMaterial(g.Key, kv.Key, kv.Value));
                 if (tk.Values.Any(x => x is not null)) treeMat = triMat.Select(x => tk[x]).ToArray();
+                if (trunkTexture is not null)
+                {
+                    var tr = matTris.ToDictionary(kv => kv.Key, kv => trunkTexture(g.Key, kv.Key, kv.Value) is not null);
+                    trunkTri = triMat.Select(x => tr[x]).ToArray();
+                }
             }
             // accepted materials: TriMaterial holds the section key (see dr2Material), the others keep the glb name
             if (dr2Material is not null)
@@ -97,7 +161,7 @@ internal static class VisualObjects
             }
             var mn = new Vector3(float.MaxValue); var mx = new Vector3(float.MinValue);
             foreach (var v in pos) { mn = Vector3.Min(mn, v); mx = Vector3.Max(mx, v); }
-            meshes[g.Key] = new Mesh(pos.ToArray(), idx.ToArray(), mn, mx, uv.ToArray(), triMat.ToArray(), matTris, treeMat);
+            meshes[g.Key] = new Mesh(pos.ToArray(), idx.ToArray(), mn, mx, uv.ToArray(), triMat.ToArray(), matTris, treeMat, trunkTri);
         }
         // a tree template's own bark: the DR2 trunk texture of its foliage_trunk material (null: the trunks class texture)
         var barkCache = new Dictionary<string, string?>();
@@ -117,6 +181,9 @@ internal static class VisualObjects
         var templates = stage["templates"]!.AsObject();
         var treeClasses = cfg.Arr("objects", "tree_shape_classes").Cast<string>().ToHashSet();
         int instances = 0, outside = 0, noMesh = 0, meshInstances = 0, proxyInstances = 0, notSolid = 0, treeInstances = 0;
+        int boxesFitted = 0, boxesKept = 0;
+        bool fitBoxes = cfg["objects"].TryGetValue("fit_colliders_to_mesh", out var fb) && fb is double fbd && fbd != 0;
+        double fitMax = cfg["objects"].TryGetValue("fit_colliders_max_cm", out var boxFitMaxValue) && boxFitMaxValue is double fmd ? fmd : 100;
         int alignChecked = 0, misaligned = 0, crownsDrawn = 0, crownsDropped = 0, staticDrawn = 0;
         // objects without a collider that are still drawn from their render mesh unless the template name matches this (null: none)
         int notSolidMaxTris = cfg["objects"].TryGetValue("not_solid_max_triangles", out var nsm) && nsm is double nsmd ? (int)nsmd : maxMeshTris;
@@ -154,11 +221,22 @@ internal static class VisualObjects
         var realTrees = new HashSet<string>();
         double nearM = cfg["vegetation"].TryGetValue("near_m", out var nmv) && nmv is double nmd ? nmd : 0;
         int nearBudget = cfg["vegetation"].TryGetValue("near_max_triangles", out var nbv) && nbv is double nbd ? (int)nbd : int.MaxValue;
+        // round 3b, the middle tier: trees within mid_m that did not fit the full budget get MidMesh (foliage simplified to mid_ratio),
+        // nearest first until mid_max_triangles; 0 = off. Farther trees keep the cards and trunk stub
+        double midM = cfg["vegetation"].TryGetValue("mid_m", out var mmv) && mmv is double mmd ? mmd : 0;
+        int midBudget = cfg["vegetation"].TryGetValue("mid_max_triangles", out var mbv) && mbv is double mbd ? (int)mbd : int.MaxValue;
+        double midRatio = cfg["vegetation"].TryGetValue("mid_ratio", out var mrv) && mrv is double mrd ? mrd : 0.3;
+        int midMinTris = cfg["vegetation"].TryGetValue("mid_min_triangles", out var mnv) && mnv is double mnd ? (int)mnd : 24;
+        var midTrees = new HashSet<string>(); var midMeshes = new Dictionary<string, Mesh?>();
+        Mesh? Mid(string tname) => midMeshes.TryGetValue(tname, out var mm) ? mm : midMeshes[tname] = meshes.TryGetValue(tname, out var full) ? MidMesh(full, midRatio, midMinTris) : null;
         int nearCandidates = 0, nearCandidateTris = 0;
-        if (nearM > 0 && treeMaterial is not null)
+        JsonObject? r0Fit = null;
+        var fitIds = new HashSet<string>();   // the trees (not bushes) drawn with a real mesh, either tier
+        if ((nearM > 0 || midM > 0) && treeMaterial is not null)
         {
-            var route = new GroundLod.RouteDistance(ir.Centre.Select(pl.ToUe).Select(q => new Vector2((float)q.X, (float)q.Y)), nearM + 50);
-            var cand = new List<(double d, string id, int tris)>();
+            double reach = Math.Max(nearM, midM);
+            var route = new GroundLod.RouteDistance(ir.Centre.Select(pl.ToUe).Select(q => new Vector2((float)q.X, (float)q.Y)), reach + 50);
+            var cand = new List<(double d, string id, int tris, string tname, bool bush)>();
             foreach (var inst in stage["instances"]!.AsArray())
             {
                 var tname = inst!["template"]!.GetValue<string>();
@@ -167,21 +245,54 @@ internal static class VisualObjects
                 var origin = Vector3.Transform(Vector3.Zero, ObjectColliders.Trs(inst["transform"]));
                 if (!inPhysicsBounds(pl.ToPhysics(origin.X, origin.Y, origin.Z))) continue;
                 var id = inst["id"]!.GetValue<string>();
-                if (!kept.TryGetValue(id, out var sh) || !IsTree(tname, sh)) continue;
+                var sh = kept.GetValueOrDefault(id) ?? [];
+                if (sh.Count > 0 && !(IsTree(tname, sh) || sh.All(s => ClassOf(s.Material) == "soft"))) continue;   // trees, solid bushes, and soft vegetation without a collider
                 var u = Ue(origin);
                 double d = route.Metres(new Vector2((float)u.X, (float)u.Y));
-                if (d <= nearM) cand.Add((d, id, tm.Count(x => x is not null) ));
+                if (d <= reach) cand.Add((d, id, tm.Count(x => x is not null), tname, !IsTree(tname, sh)));
             }
-            nearCandidates = cand.Count; nearCandidateTris = cand.Sum(c => c.tris);
-            int used = 0;
+            nearCandidates = cand.Count(c => c.d <= nearM); nearCandidateTris = cand.Where(c => c.d <= nearM).Sum(c => c.tris);
+            int used = 0, midUsed = 0, bushUsed = 0;
+            int bushBudget = cfg["vegetation"].TryGetValue("bush_max_triangles", out var bbv) && bbv is double bbd ? (int)bbd : 0;
             foreach (var c in cand.OrderBy(c => c.d))
             {
-                if (used + c.tris > nearBudget) continue;
-                used += c.tris; realTrees.Add(c.id);
+                // bushes (soft vegetation, solid bush colliders): thinned DR2 mesh within mid_m from their own budget, so the trees keep theirs
+                if (c.bush) { if (c.d <= midM && Mid(c.tname) is { } bm && bushUsed + bm.Idx.Length / 3 <= bushBudget) { bushUsed += bm.Idx.Length / 3; midTrees.Add(c.id); } continue; }
+                if (c.d <= nearM && used + c.tris <= nearBudget) { used += c.tris; realTrees.Add(c.id); fitIds.Add(c.id); continue; }
+                if (c.d <= midM && Mid(c.tname) is { } mid && midUsed + mid.Idx.Length / 3 <= midBudget) { midUsed += mid.Idx.Length / 3; midTrees.Add(c.id); fitIds.Add(c.id); }
             }
         }
+        // collider fit: every tree template with a real DR2 mesh (drawn real, middle tier or as card + stub; the stub follows the collider) has its trunk capsule fitted to the real trunk (ColliderFit.FitMeshTrees, as the instanced trees' are), so no thick stand-in is
+        // drawn for the part of DR2's capsule beyond the trunk. Runs on the selection above, once per stage-build (the capsules are shared by both cells); the build check still
+        // holds each collider to what is drawn
+        bool fitColliders = (cfg["vegetation"].TryGetValue("fit_tree_colliders", out var frv) && frv is double frd ? frd : cfg["vegetation"].TryGetValue("fit_real_tree_colliders", out var frv2) && frv2 is double frd2 ? frd2 : 1) != 0;
+        if (fitColliders)
+        {
+            var fitList = new List<ColliderFit.MeshTree>();
+            foreach (var inst in stage["instances"]!.AsArray())
+            {
+                var id = inst!["id"]!.GetValue<string>(); var tname = inst["template"]!.GetValue<string>();
+                if (instanced?.Contains(tname) == true || objs.RealFitted.Contains(id) || !meshes.TryGetValue(tname, out var fm) || fm.TreeMat is null) continue;
+                var org = Vector3.Transform(Vector3.Zero, ObjectColliders.Trs(inst["transform"]));
+                if (!inPhysicsBounds(pl.ToPhysics(org.X, org.Y, org.Z)) || !IsTree(tname, kept.GetValueOrDefault(id) ?? [])) continue;
+                var caps = (kept.GetValueOrDefault(id) ?? []).Where(s => s.Material == "PM_WallWoodTreeTrunks" && s.Capsule is { } cp && Math.Abs(ObjectColliders.RotationAxes(cp.Rot[0], cp.Rot[1], cp.Rot[2]).Item2.Z) > 0.7).Select(s => s.Capsule!).ToList();
+                objs.RealFitted.Add(id);
+                if (caps.Count == 0) continue;
+                var tm0 = ObjectColliders.Trs(inst["transform"]);
+                fitList.Add(new(tname, id, Ue(Vector3.Transform(Vector3.Zero, tm0)).Z, () => fm.Pos.Select(p => { var u = Ue(Vector3.Transform(p, tm0)); return new Vector3((float)u.X, (float)u.Y, (float)u.Z); }).ToArray(), caps));
+            }
+            var fitGeo = new Dictionary<string, (IReadOnlyList<uint>, IReadOnlyList<uint>)>();
+            r0Fit = ColliderFit.FitMeshTrees(fitList, t =>
+            {
+                if (fitGeo.TryGetValue(t, out var g)) return g;
+                var fm = meshes[t]; var tm = fm.TreeMat!;
+                IEnumerable<uint> Tris(Func<int, bool> pick) => Enumerable.Range(0, fm.Idx.Length / 3).Where(pick).SelectMany(k => new[] { fm.Idx[k * 3], fm.Idx[k * 3 + 1], fm.Idx[k * 3 + 2] });
+                return fitGeo[t] = (Tris(k => tm[k] is not null && fm.TrunkTri?[k] == true).ToList(), Tris(k => tm[k] is not null).ToList());
+            }, cfg.Num("instancing", "collider_gap_limit_cm"));
+        }
+        int midDrawn = 0, midTris = 0;
         int realDrawn = 0, realTris = 0, realClipped = 0, realClippedTris = 0, instancedPlacements = 0, instancedSolid = 0;
-        var realPer = new SortedDictionary<string, int>(); var cardedPer = new SortedDictionary<string, int>();
+        var realPer = new SortedDictionary<string, int>(); var cardedPer = new SortedDictionary<string, int>(); var midPer = new SortedDictionary<string, int>();
 
         foreach (var inst in stage["instances"]!.AsArray())
         {
@@ -307,7 +418,14 @@ internal static class VisualObjects
             // solid bush colliders (PM_WallBush): soft vegetation is mostly not drawn (v1.4; drawn they were up to 3M triangles of bushes).
             // A collider with no card, or within reach of the road, is drawn all the same, into "other" (soft stays out of the
             // road corridor): no invisible obstacle
-            if (!tree && shapes.Count > 0 && shapes.All(s => ClassOf(s.Material) == "soft"))
+            string iid = inst["id"]!.GetValue<string>();
+            bool bush = !tree && shapes.Count > 0 && shapes.All(s => ClassOf(s.Material) == "soft");
+            bool plant = shapes.Count == 0 && !tree;   // no collider of its own (soft vegetation: DR2 bushes the car drives through)
+            bool midTier = (shapes.Count > 0 && (tree || bush) || plant) && midTrees.Contains(iid);
+            if (midTier) mesh = Mid(tname);
+            // round 3b: a bush picked for the full or middle tier is drawn with its DR2 mesh instead of its card (below, as a tree)
+            bool bushReal = (bush || plant) && (midTier || realTrees.Contains(iid)) && mesh?.TreeMat is not null;
+            if (bush && !bushReal)
             {
                 notSolid++;
                 bool bushCard = TryCard(tname, mesh, m) == true;
@@ -317,8 +435,16 @@ internal static class VisualObjects
                 perTemplate.TryAdd(tname, bushCard ? (nearRoad ? "bush collider: billboard cards and collider shapes" : "bush collider: billboard cards") : "bush collider: shapes");
                 continue;
             }
-            if (tree && shapes.Count > 0 && mesh?.TreeMat is { } tmat && realTrees.Contains(inst["id"]!.GetValue<string>()))
+            if ((tree && shapes.Count > 0 || bushReal) && mesh?.TreeMat is { } tmat && (midTier || realTrees.Contains(iid)))
             {
+                if (bushReal)
+                {
+                    // the bush's soft collider within reach of the road is drawn as before (with a card it was too): no invisible obstacle
+                    notSolid++;
+                    if (shapes.Any(s => { var (cmn, cmx) = ColliderBounds(s); return objs.Probe.Road.QueryNear((cmn.X + cmx.X) / 2, (cmn.Y + cmx.Y) / 2).clearance < 1500; }))
+                        foreach (var s in shapes) DrawShape(s, "other");
+                    perTemplate.TryAdd(tname, "bush collider: real DR2 mesh");
+                }
                 // round 3: a tree near the road is drawn with its real LOD0 mesh (opaque trunk, cut-out foliage); no card, no trunk
                 // stub (the real trunk is there, the collider capsule is no wider). Triangles reaching into the road corridor beyond
                 // what the colliders may are left out, as for the ornaments
@@ -332,9 +458,9 @@ internal static class VisualObjects
                     if (objs.Probe.TriangleDepth(w[mesh.Idx[t * 3]], w[mesh.Idx[t * 3 + 1]], w[mesh.Idx[t * 3 + 2]], 50, objs.Probe.HMin, overhang, surfaceOnly: false) > meshPenLimit) { dropT[t] = true; dropN++; }
                 if (dropN > 0) { drop = dropT; realClipped++; realClippedTris += dropN; }
                 ProcMesh.Section TreeSec(string key) => sec.TryGetValue(TreePrefix + key, out var ts) ? ts : sec[TreePrefix + key] = new ProcMesh.Section();
-                realTris += AddMeshSplit(t => TreeSec(tmat[t]!), _ => true, mesh, m, Ue, t => tmat[t] is not null && (drop is null || !drop[t]));
-                realDrawn++;
-                realPer[tname] = realPer.GetValueOrDefault(tname) + 1;
+                int added = AddMeshSplit(t => TreeSec(tmat[t]!), _ => true, mesh, m, Ue, t => tmat[t] is not null && (drop is null || !drop[t]));
+                if (midTier) { midTris += added; midDrawn++; midPer[tname] = midPer.GetValueOrDefault(tname) + 1; }
+                else { realTris += added; realDrawn++; realPer[tname] = realPer.GetValueOrDefault(tname) + 1; }
             }
             else
             if (tree && shapes.Count > 0)
@@ -360,6 +486,18 @@ internal static class VisualObjects
                      && MeshDepth(mesh, m, Ue, objs.Probe, overhang) is var depth && (depth <= meshPenLimit || Fallback(tname, depth)))
             {
                 meshInstances++;
+                if (fitBoxes)
+                {
+                    var vertices = mesh.Idx.Distinct().Select(i => Ue(Vector3.Transform(mesh.Pos[i], m))).ToArray();
+                    foreach (var shape in shapes.Where(s => s.Box is not null))
+                        if (ColliderFit.FitBox(shape, vertices, fitMax))
+                        {
+                            boxesFitted++;
+                            shape.EnclosedFittedInterior = cfg.Num("objects", "enclosed_interior") != 0 &&
+                                ColliderFit.EnclosedBox(shape, mesh.Idx.Select(i => Ue(Vector3.Transform(mesh.Pos[i], m))).ToArray());
+                        }
+                        else boxesKept++;
+                }
                 var cls = shapes.GroupBy(s => ClassOf(s.Material)).OrderByDescending(g => g.Count()).First().Key;
                 if (dr2Material is null) AddMesh(sec[cls], mesh, m, pl, Ue);
                 else
@@ -454,6 +592,7 @@ internal static class VisualObjects
 
         foreach (var s in sec.Values)
             for (int i = 0; i < s.Nrm.Count; i++) s.Nrm[i] = s.Nrm[i] == Vector3.Zero ? Vector3.UnitZ : Vector3.Normalize(s.Nrm[i]);
+        Console.WriteLine($"objects: colliders fitted to render meshes: {boxesFitted} fitted, {boxesKept} kept (maximum shrink {fitMax:0} cm per side)");
         var r = new JsonObject
         {
             ["instances"] = instances, ["outside_physics_bounds"] = outside, ["trees"] = treeInstances,
@@ -509,14 +648,19 @@ internal static class VisualObjects
             },
             ["templates"] = new JsonObject(perTemplate.Select(kv => KeyValuePair.Create(kv.Key, (JsonNode?)kv.Value))),
         };
+        r["collider_fit"] = r0Fit;
         r["real_trees"] = new JsonObject
         {
             ["near_m"] = nearM, ["near_max_triangles"] = nearBudget == int.MaxValue ? null : nearBudget,
             ["candidates_within_near_m"] = nearCandidates, ["candidate_triangles"] = nearCandidateTris,
             ["drawn_real"] = realDrawn, ["triangles"] = realTris, ["clipped_for_road"] = realClipped, ["triangles_left_out_for_road"] = realClippedTris,
             ["drawn_carded_or_stub"] = cardedPer.Values.Sum(),
-            ["per_template_real"] = new JsonObject(realPer.Select(kv => KeyValuePair.Create(kv.Key, (JsonNode?)$"{kv.Value} real, {cardedPer.GetValueOrDefault(kv.Key)} far"))),
+            ["mid_m"] = midM, ["mid_max_triangles"] = midBudget == int.MaxValue ? null : midBudget, ["mid_ratio"] = midRatio,
+            ["drawn_mid"] = midDrawn, ["mid_triangles"] = midTris,
+            ["mid_mesh_triangles"] = new JsonObject(midMeshes.Where(kv => kv.Value is not null).OrderBy(kv => kv.Key).Select(kv => KeyValuePair.Create(kv.Key, (JsonNode?)$"{meshes[kv.Key].TreeMat!.Count(x => x is not null)} -> {kv.Value!.Idx.Length / 3}"))),
+            ["per_template_real"] = new JsonObject(realPer.Keys.Union(midPer.Keys).Union(cardedPer.Keys).Select(k => KeyValuePair.Create(k, (JsonNode?)$"{realPer.GetValueOrDefault(k)} real, {midPer.GetValueOrDefault(k)} mid, {cardedPer.GetValueOrDefault(k)} far"))),
         };
+        Console.WriteLine($"visuals: trees: {realDrawn} full ({realTris} triangles), {midDrawn} simplified ({midTris} triangles), {cardedPer.Values.Sum()} cards/stubs");
         r["trunk_draw_height_m"] = trunkDrawCm > 0 ? trunkDrawCm / 100 : null;
         r["bark_sections"] = new JsonObject(sec.Where(kv => kv.Key.StartsWith(BarkPrefix) && kv.Value.Idx.Count > 0).OrderBy(kv => kv.Key)
             .Select(kv => KeyValuePair.Create(kv.Key[BarkPrefix.Length..], (JsonNode?)$"{kv.Value.Idx.Count / 3} triangles")));

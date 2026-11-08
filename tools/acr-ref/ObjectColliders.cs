@@ -138,6 +138,7 @@ internal static class ObjectColliders
     {
         public string Material = "", Template = "", Instance = "", Kind = "";
         public Box? Box;
+        public bool EnclosedFittedInterior;
         public Capsule? Capsule;
         public List<Vector3>? MeshPhysics;     // cone: vertices in physics metres
         public List<uint>? MeshTris;
@@ -151,6 +152,7 @@ internal static class ObjectColliders
         public JsonObject Report = new();
         public RoadProbe Probe = null!;
     public HashSet<string> RoadCodes = new();
+        public HashSet<string> RealFitted = new();   // DR2 instances whose capsules VisualObjects.Build already fitted to their real trunks (once per stage-build, both cells)
     }
 
     // ---- frames ----

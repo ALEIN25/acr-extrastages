@@ -15,6 +15,88 @@ namespace AcrRef;
 /// DR2 capsule and is listed. Measure reports the gap both ways for the check (collider beyond trunk, trunk beyond collider).
 internal static class ColliderFit
 {
+    // Test the actual instance mesh at two car heights; roof/floor coverage cannot pass this test.
+    internal static bool EnclosedBox(ObjectColliders.Shape shape, V3[] triangles)
+    {
+        if (shape.Box is not { } b) return false;
+        var (x, y, z) = ObjectColliders.RotationAxes(b.Rot[0], b.Rot[1], b.Rot[2]);
+        // a box's up axis is its third one (z: DR2 width, length, height = X, Y, Z); the footprint is spanned by x and y
+        var corners = new[] { b.Center - x * (b.X / 2) - y * (b.Y / 2),
+            b.Center + x * (b.X / 2) - y * (b.Y / 2),
+            b.Center + x * (b.X / 2) + y * (b.Y / 2),
+            b.Center - x * (b.X / 2) + y * (b.Y / 2) };
+        // sample heights above the drawn mesh's foot (the ground), not the box bottom: DR2 building boxes reach 1 m+ underground
+        double baseZ = Math.Max(shape.FootprintUe.Min(p => p.Z), triangles.Min(p => p.Z));
+        var verts = triangles.Select(p => new Vector3((float)p.X, (float)p.Y, (float)p.Z)).ToArray();
+        var indices = Enumerable.Range(0, verts.Length).Select(i => (uint)i).ToArray();
+        // several heights above the drawn foot (houses on a slope: low samples are underground on the uphill side); enclosed when at
+        // least two of them are covered
+        int goodHeights = 0;
+        foreach (double height in new[] { 50.0, 100.0, 150.0, 200.0, 250.0 })
+        {
+            var segments = Section(verts, indices, baseZ + height);
+            int total = 0, covered = 0;
+            for (int edge = 0; edge < 4; edge++)
+            {
+                var a = corners[edge]; var c = corners[(edge + 1) % 4];
+                int steps = Math.Max(1, (int)Math.Ceiling(Math.Sqrt(Math.Pow(c.X - a.X, 2) + Math.Pow(c.Y - a.Y, 2)) / 25));
+                for (int i = 0; i < steps; i++)
+                {
+                    double t = (i + 0.5) / steps;
+                    var p = new Vector2((float)(a.X + (c.X - a.X) * t), (float)(a.Y + (c.Y - a.Y) * t));
+                    var inward = new Vector2((float)b.Center.X, (float)b.Center.Y) - p;
+                    if (inward.Length() > 2) p += Vector2.Normalize(inward) * 2;
+                    total++;
+                    // covered: a drawn wall of the object within 30 cm, or shielding the point from outside (a ray outward meets one of
+                    // the object's own drawn surfaces within 6 m: an annex or porch in front of the box side, which a car hits first)
+                    var outward = inward.Length() > 0 ? -Vector2.Normalize(inward) : Vector2.Zero;
+                    if (segments.Any(s => {
+                        var d = s.b - s.a;
+                        float f = d.LengthSquared() > 0 ? Math.Clamp(Vector2.Dot(p - s.a, d) / d.LengthSquared(), 0, 1) : 0;
+                        if (Vector2.DistanceSquared(p, s.a + f * d) <= 30 * 30) return true;
+                        float den = outward.X * d.Y - outward.Y * d.X;
+                        if (Math.Abs(den) < 1e-6f) return false;
+                        var w = s.a - p;
+                        float t = (w.X * d.Y - w.Y * d.X) / den, u = (w.X * outward.Y - w.Y * outward.X) / den;
+                        return t >= 0 && t <= 600 && u >= 0 && u <= 1;
+                    })) covered++;
+                }
+            }
+            if (covered >= total * 0.9) goodHeights++;
+        }
+        return goodHeights >= 2;
+    }
+    // Intersect the box with mesh bounds measured in the box's own orthonormal frame.
+    // Mutate the kept physics shape, just as the tree fit does before Finish writes it.
+    internal static bool FitBox(ObjectColliders.Shape shape, IEnumerable<V3> vertices, double maxCm)
+    {
+        if (shape.Box is not { } b) return false;
+        var (x, y, z) = ObjectColliders.RotationAxes(b.Rot[0], b.Rot[1], b.Rot[2]);
+        V3[] axes = [x, y, z]; double[] size = [b.X, b.Y, b.Z];
+        double[] lo = [double.PositiveInfinity, double.PositiveInfinity, double.PositiveInfinity];
+        double[] hi = [double.NegativeInfinity, double.NegativeInfinity, double.NegativeInfinity];
+        foreach (var p in vertices)
+        {
+            var d = p - b.Center;
+            for (int k = 0; k < 3; k++)
+            {
+                var a = axes[k]; double q = d.X * a.X + d.Y * a.Y + d.Z * a.Z;
+                lo[k] = Math.Min(lo[k], q); hi[k] = Math.Max(hi[k], q);
+            }
+        }
+        for (int k = 0; k < 3; k++)
+        {
+            lo[k] = Math.Max(lo[k], -size[k] / 2); hi[k] = Math.Min(hi[k], size[k] / 2);
+            if (!double.IsFinite(lo[k]) || !double.IsFinite(hi[k]) || hi[k] <= lo[k] ||
+                lo[k] + size[k] / 2 > maxCm || size[k] / 2 - hi[k] > maxCm) return false;
+        }
+        b.Center += x * ((lo[0] + hi[0]) / 2) + y * ((lo[1] + hi[1]) / 2) + z * ((lo[2] + hi[2]) / 2);
+        b.X = hi[0] - lo[0]; b.Y = hi[1] - lo[1]; b.Z = hi[2] - lo[2];
+        shape.FootprintUe.Clear();
+        foreach (double a in new[] { -1.0, 1.0 }) foreach (double c in new[] { -1.0, 1.0 }) foreach (double d in new[] { -1.0, 1.0 })
+            shape.FootprintUe.Add(b.Center + x * (a * b.X / 2) + y * (c * b.Y / 2) + z * (d * b.Z / 2));
+        return true;
+    }
     internal static readonly double[] Heights = [30, 100, 200];
     static readonly double[] FitHeights = [30, 65, 100, 150, 200];
 
@@ -161,6 +243,51 @@ internal static class ColliderFit
         }
         Console.WriteLine($"instancing: colliders fitted to the real trunks: {fitted} capsules fitted ({overAll.Count} still over {limitCm:0} cm at car height), {failed} keep their DR2 capsule ({noCapsule} instances without a capsule)");
         return new JsonObject { ["limit_cm"] = limitCm, ["fitted"] = fitted, ["kept_dr2_capsule"] = failed, ["fitted_but_over_limit"] = overAll.Count, ["without_capsule"] = noCapsule, ["failed_ids"] = failedAll, ["over_limit_ids"] = overAll, ["per_species"] = per };
+    }
+
+    /// A tree drawn with a real mesh in the merged visuals (VisualObjects.Build, full and middle tier): its template, DR2 instance, base height, mesh vertices in world UE cm and trunk capsules.
+    internal sealed record MeshTree(string Template, string Id, double BaseZ, Func<Vector3[]> World, List<ObjectColliders.Capsule> Caps);
+
+    /// The same fit for the trees of the merged visuals. The trunk triangles are the real mesh's (the middle tier keeps them whole, so one fit serves both tiers); geometry per template:
+    /// trunk triangles, or all tree triangles where those fit clearly worse. Unlike FitAll a capsule is only changed when the fit is closer to the trunk than DR2's AND within limitCm;
+    /// a multi-stem clump or fork keeps its DR2 capsule (and the proxy hull the build check wants for it). Capsules are changed in place.
+    internal static JsonObject FitMeshTrees(IReadOnlyList<MeshTree> trees, Func<string, (IReadOnlyList<uint> trunk, IReadOnlyList<uint> all)> geometry, double limitCm)
+    {
+        var per = new JsonObject(); int fitted = 0, kept = 0, over = 0, total = trees.Sum(t => t.Caps.Count);
+        foreach (var g in trees.GroupBy(t => t.Template).OrderBy(g => g.Key))
+        {
+            var (trunkIdx, allIdx) = geometry(g.Key);
+            double Probe(IReadOnlyList<uint> ix)
+            {
+                var sc = new List<double>();
+                foreach (var t in g.Take(20))
+                {
+                    var wv = t.World();
+                    foreach (var c in t.Caps)
+                        sc.Add(TryFit(wv, ix, c, t.BaseZ, out _) is { } f ? Score(wv, ix, f.centre, c, f.radius, f.length, t.BaseZ) : 999);
+                }
+                return sc.Count == 0 ? 999 : sc.Average();
+            }
+            bool all = trunkIdx.Count == 0 || Probe(allIdx) < Probe(trunkIdx) - 3;
+            var idx = all ? allIdx : trunkIdx;
+            int ok = 0, bad = 0, ovr = 0;
+            foreach (var t in g)
+            {
+                var wv = t.World();
+                foreach (var c in t.Caps)
+                {
+                    if (TryFit(wv, idx, c, t.BaseZ, out _) is not { } f) { bad++; continue; }
+                    double s0 = Score(wv, idx, c.Center, c, c.Radius, c.Length, t.BaseZ), s1 = Score(wv, idx, f.centre, c, f.radius, f.length, t.BaseZ);
+                    if (s1 > s0) { bad++; continue; }
+                    if (s1 > limitCm) { ovr++; continue; }
+                    c.Center = f.centre; c.Radius = f.radius; c.Length = f.length; ok++;
+                }
+            }
+            fitted += ok; kept += bad; over += ovr;
+            per[g.Key] = new JsonObject { ["geometry"] = all ? "all sections" : "trunk sections", ["fitted"] = ok, ["kept_dr2_capsule"] = bad, ["fit_over_limit_kept_dr2_capsule"] = ovr };
+        }
+        Console.WriteLine($"vegetation: colliders fitted to the real trunks (full and middle tier trees): {fitted} of {total} capsules fitted, {kept} keep their DR2 capsule (no usable section or no closer), {over} keep it because the fit is still over {limitCm:0} cm");
+        return new JsonObject { ["limit_cm"] = limitCm, ["capsules"] = total, ["fitted"] = fitted, ["kept_dr2_capsule"] = kept, ["over_limit_kept_dr2_capsule"] = over, ["per_template"] = per };
     }
 
     // ---- measuring ----------------------------------------------------------------------------------------------------------------

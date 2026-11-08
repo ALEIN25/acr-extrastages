@@ -21,6 +21,11 @@ internal static class Instancing
     public static bool Enabled(Toml cfg, string stage) => cfg["instancing"].TryGetValue("enabled", out var v) && v is double d && d != 0
         && cfg["instancing"].TryGetValue("stages", out var s) && s is object[] list && list.Any(x => x as string == stage);
 
+    const string ReplayActor = "BC_ReplayCamerasActor_C";
+    /// [instancing] owner: the class of the gameplay-cell actor that owns the components (default: the replay-camera actor). The components
+    /// stay attached to the replay actor's DefaultSceneRoot either way; only the replay actor lists them in InstanceComponents.
+    internal static string OwnerClass(Toml cfg) => cfg["instancing"].TryGetValue("owner", out var o) && o is string s && s.Length > 0 ? s : ReplayActor;
+
     static string Clean(string s) => Regex.Replace(s, "[^A-Za-z0-9_]", "_");
 
     // 96-byte export entry of HISM_SM_LarchWales01_4 in a Hafren South PCG cell (class and template are imports of that package,
@@ -274,6 +279,7 @@ internal static class Instancing
         public readonly SortedDictionary<string, Species> Species = new(StringComparer.Ordinal);
         public JsonObject Report = new();
         public double ChunkM;
+        public string Owner = ReplayActor;   // [instancing] owner: the class of the actor that owns (registers) the components
         public bool Fitted;   // ColliderFit.FitAll has run on this stage-build's colliders
         public HashSet<string> Templates => Species.Keys.ToHashSet();
         /// Instance id -> the tree's base height (UE cm), for the colliders of instanced trees.
@@ -315,7 +321,7 @@ internal static class Instancing
                                Func<string, string, int, (string key, string mic)?> materialOf, Func<string, string, int, bool> isTrunk,
                                Func<string, (string mic, int frames)?> billboardOf)
     {
-        var plan = new Plan { ChunkM = cfg.Num("instancing", "chunk_m") };
+        var plan = new Plan { ChunkM = cfg.Num("instancing", "chunk_m"), Owner = OwnerClass(cfg) };
         string tplPackage = cfg.Str("instancing", "mesh_template");
         string legacy = opt.InstancingLegacy ?? dr2.Legacy;
         var stageObjs = JsonNode.Parse(File.ReadAllText(Path.Combine(ir.Dir, "stage.json")))!["objects"]!;
@@ -404,7 +410,8 @@ internal static class Instancing
     /// Returns the report (the plan's, plus the components).
     public static JsonObject AddComponents(LegacyPackage cell, Plan plan, int seed = 7919)
     {
-        int actor = Enumerable.Range(0, cell.ExportCount).Single(e => cell.ExportClass(e) == "BC_ReplayCamerasActor_C");
+        int actor = Enumerable.Range(0, cell.ExportCount).Single(e => cell.ExportClass(e) == ReplayActor);
+        int owner = Enumerable.Range(0, cell.ExportCount).Single(e => cell.ExportClass(e) == plan.Owner);
         var deps = cell.ExportDeps(actor);
         int root = Enumerable.Range(0, cell.ExportCount).Single(e => cell.ExportOuter(e) == actor + 1 && cell.ExportName(e) == "DefaultSceneRoot");
         var loc = RootLocation(cell, root);
@@ -435,7 +442,7 @@ internal static class Instancing
                 var local = items.Select(p => { var m = (double[])p.Matrix.Clone(); m[12] -= loc.X; m[13] -= loc.Y; m[14] -= loc.Z; return m; }).ToList();
                 var data = HismData(meshImp, root + 1, noCollision, local, sp.Min, sp.Max, seed);
                 string name = ChunkName(sp.Template, key);
-                int e = cell.AddExport(Convert.FromHexString(HismEntry), name, cls, 0, cdo, actor + 1, 0, data, [], [meshImp, root + 1], [cls, cdo], [actor + 1]);
+                int e = cell.AddExport(Convert.FromHexString(HismEntry), name, cls, 0, cdo, owner + 1, 0, data, [], [meshImp, root + 1], [cls, cdo], [owner + 1]);
                 added.Add(e);
                 comps.Add(new JsonObject { ["component"] = name, ["export"] = e, ["template"] = sp.Template, ["instances"] = items.Count, ["export_bytes"] = data.Length });
                 instances += items.Count;
@@ -443,7 +450,15 @@ internal static class Instancing
             perSpecies[sp.Template] = $"{sp.Placed.Count} instances in {chunks.Count} components (largest {chunks.Max(c => c.items.Count)})";
         }
 
-        // the owner's InstanceComponents (slot 78) and its create-before-serialization dependencies
+        var r = (JsonObject)plan.Report.DeepClone();
+        r["components"] = comps; r["component_count"] = comps.Count; r["instances"] = instances; r["per_species"] = perSpecies;
+        r["owner"] = cell.ExportName(owner); r["attach_parent"] = cell.ExportName(root);
+        r["root_location_cm"] = $"{loc.X:0.###},{loc.Y:0.###},{loc.Z:0.###}";
+        r["exports"] = $"{exportsBefore} -> {cell.ExportCount}";
+        Console.WriteLine($"instancing: {comps.Count} components, {instances} instances in {cell.ExportName(owner)} ({exportsBefore} -> {cell.ExportCount} exports)");
+        if (owner != actor) return r;
+
+        // the replay actor's InstanceComponents (slot 78) and its create-before-serialization dependencies
         var ad = cell.GetExportData(actor);
         int p = 0;
         var slots = Unv.ReadHeader(ad, ref p);
@@ -464,14 +479,7 @@ internal static class Instancing
         cell.SetExportData(actor, nd);
         List<int> Of(string k) => deps.Where(x => x.kind == k).Select(x => x.index).ToList();
         cell.SetExportDeps(actor, Of("SBS"), Of("CBS").Concat(added.Select(e => e + 1)).ToList(), Of("SBC"), Of("CBC"));
-
-        var r = (JsonObject)plan.Report.DeepClone();
-        r["components"] = comps; r["component_count"] = comps.Count; r["instances"] = instances; r["per_species"] = perSpecies;
-        r["owner"] = cell.ExportName(actor); r["attach_parent"] = cell.ExportName(root);
-        r["root_location_cm"] = $"{loc.X:0.###},{loc.Y:0.###},{loc.Z:0.###}";
         r["instance_components"] = $"{count} -> {count + added.Count}";
-        r["exports"] = $"{exportsBefore} -> {cell.ExportCount}";
-        Console.WriteLine($"instancing: {comps.Count} components, {instances} instances in {cell.ExportName(actor)} ({exportsBefore} -> {cell.ExportCount} exports)");
         return r;
     }
 
@@ -750,7 +758,8 @@ internal static class Instancing
         // ---- the components in the cell
         var hisms = ReadHisms(cell);
         var rep = inst["components"]!.AsArray();
-        int actor = Enumerable.Range(0, cell.ExportCount).Single(e => cell.ExportClass(e) == "BC_ReplayCamerasActor_C");
+        int actor = Enumerable.Range(0, cell.ExportCount).Single(e => cell.ExportClass(e) == ReplayActor);
+        string ownerClass = OwnerClass(cfg);
         var ad = cell.GetExportData(actor);
         int ap = 0; var aslots = Unv.ReadHeader(ad, ref ap);
         foreach (var s in aslots) { if (s.Index == 78) break; if (!s.Zero) ap += 4; }
@@ -762,8 +771,11 @@ internal static class Instancing
           $"{label} components: {hisms.Count} HierarchicalInstancedStaticMeshComponents named HISM_* in the cell = {rep.Count} in the report ({cell.ExportCount} exports, {cell.Names.Count} names)");
         foreach (var h in hisms)
         {
-            A("HISM owner lists it in InstanceComponents and depends on it", cell.ExportName(h.Owner).StartsWith("BC_ReplayCamerasActor_C") && listed.Contains(h.Export + 1) && cbs.Contains(h.Export + 1), h.Name);
-            A("HISM attached to the owner's DefaultSceneRoot", h.Attach == sceneRoot && cell.ExportOuter(h.Attach) == h.Owner + 1, h.Name);
+            if (ownerClass == ReplayActor)
+                A("HISM owner lists it in InstanceComponents and depends on it", h.Owner == actor && listed.Contains(h.Export + 1) && cbs.Contains(h.Export + 1), h.Name);
+            else
+                A($"HISM owned by {ownerClass}, not listed by the replay actor", h.Owner >= 0 && cell.ExportClass(h.Owner) == ownerClass && !listed.Contains(h.Export + 1) && !cbs.Contains(h.Export + 1), h.Name);
+            A("HISM attached to the replay actor's DefaultSceneRoot", h.Attach == sceneRoot && cell.ExportOuter(h.Attach) == actor + 1, h.Name);
             A("HISM bytes (no CachedBounds, native tail parses to the end, counts = SortedInstances = reorder table, identity tables, one leaf over 0..N-1)", h.Problems.Count == 0, $"{h.Name}: {string.Join("; ", h.Problems)}");
         }
         // ImportName gives the package's /Game path: it must be the one of the species the component is named after

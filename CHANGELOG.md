@@ -15,6 +15,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Reverse variants: a route and its reverse build into one stage, with its own menu map and
   elevation profile (`config/variants.toml`).
 - Real DiRT Rally 2.0 rocks near the road, and real tree models for the nearest trees.
+- Many more real trees: full DiRT Rally 2.0 tree models within 12 m of the road, the same trees with
+  thinned foliage out to 25 m, flat cards only beyond that (`[vegetation]` near_m / mid_m). Bushes
+  near the road use their real models too. Finland 01 r2 runs at about 80 FPS on the test PC.
+- Tree trunk and object colliders are fitted to their visible models, so no thick trunk pillars or
+  collider boxes are drawn over trees, houses and vehicles that are walled in at car height.
 - A build check that fails a stage if something solid near the road cannot be seen. Colliders
   with nothing drawn on them are now drawn.
 
