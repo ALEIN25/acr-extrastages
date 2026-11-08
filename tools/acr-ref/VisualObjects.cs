@@ -120,6 +120,7 @@ internal static class VisualObjects
         HashSet<string>? instanced = null)
     {
         bool spherical = FoliageLighting.Spherical(cfg);
+        CardUp = (cfg["vegetation"].TryGetValue("card_normals", out var cnv) ? cnv as string : "face") switch { "face" => false, "up" => true, _ => throw new InvalidDataException("vegetation.card_normals must be face or up") };
         int maxMeshTris = (int)cfg.Num("objects", "max_mesh_triangles");
         int sides = (int)cfg.Num("objects", "prism_sides");
         double trunkDrawCm = cfg["objects"].TryGetValue("trunk_draw_height_m", out var tdh) && tdh is double tdhd ? tdhd * 100 : 0;   // 0: whole trunk
@@ -1212,9 +1213,16 @@ internal static class VisualObjects
         int i0 = s.Pos.Count;
         foreach (var (p, uv) in new[] { (mid - d + new Vector3(0, 0, z0), new Vector2(u0, 1)), (mid + d + new Vector3(0, 0, z0), new Vector2(u1, 1)),
                                         (mid + d + new Vector3(0, 0, z1), new Vector2(u1, 0)), (mid - d + new Vector3(0, 0, z1), new Vector2(u0, 0)) })
-        { s.Pos.Add(p); s.Nrm.Add(n); s.Uv.Add(uv); }
+        { s.Pos.Add(p); s.Nrm.Add(CardUp ? Vector3.Normalize(n * 0.35f + Vector3.UnitZ) : n); s.Uv.Add(uv); }
         s.Idx.AddRange([(uint)i0, (uint)i0 + 2, (uint)i0 + 1, (uint)i0, (uint)i0 + 3, (uint)i0 + 2]);
+        if (!CardUp) return;
+        // [vegetation] card_normals = "up": a horizontal card normal took almost no light from a high sun, and a two-sided
+        // material flipped it downward on the back. Both faces get their own copy with a normal tilted up toward the sky.
+        int i1 = s.Pos.Count;
+        for (int k = 0; k < 4; k++) { s.Pos.Add(s.Pos[i0 + k]); s.Nrm.Add(Vector3.Normalize(-n * 0.35f + Vector3.UnitZ)); s.Uv.Add(s.Uv[i0 + k]); }
+        s.Idx.AddRange([(uint)i1, (uint)i1 + 1, (uint)i1 + 2, (uint)i1, (uint)i1 + 2, (uint)i1 + 3]);
     }
+    internal static bool CardUp;
 
     /// A single card along the road for a plant too close to it for a crossed pair: its direction is perpendicular to the
     /// road-clearance gradient at the plant, and its half-width shrinks until both ends and their midpoints keep

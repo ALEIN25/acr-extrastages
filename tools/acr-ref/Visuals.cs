@@ -473,7 +473,7 @@ internal static class Visuals
                     (template, mat, tris) => TreeKey(template, mat, tris) is { } k ? (k,
                         treeLeafKeys.Contains(k) ? dr2!.TreeLeafMic(treeDiffuse[k]!) : dr2!.ObjectMic(treeDiffuse[k]!)) : null,
                     (template, mat, tris) => TrunkOf(template, mat, tris) is not null,
-                    template => CardTexture(template) is { } cardTex ? (dr2!.MaskedMic("card_" + cardTex, dr2.CardTexture(cardTex), dr2.CardNormal(cardTex)), CardFrames(cardTex)) : null);
+                    template => CardTexture(template) is { } cardTex ? (dr2!.CardMic(cardTex), CardFrames(cardTex)) : null);
             }
             // DR2's capsules of the instanced trees are our own physics data: fitted to the real trunks before BakedData is written (StageBuild.Finish), once per stage-build
             if (instancingPlan is not null && !instancingPlan.Fitted && objects is not null) { instancingPlan.Report["collider_fit"] = ColliderFit.FitAll(instancingPlan, objects, cfg.Num("instancing", "collider_gap_limit_cm")); instancingPlan.Fitted = true; }
@@ -486,7 +486,7 @@ internal static class Visuals
             foreach (var (key, s) in objSecs.Where(kv => kv.Key.StartsWith(VisualObjects.CardPrefix) && kv.Value.Idx.Count > 0).OrderBy(kv => kv.Key))
             {
                 var tex = key[VisualObjects.CardPrefix.Length..];
-                sections.Add(s); mats.Add(MatPath(dr2!.MaskedMic("card_" + tex, dr2.CardTexture(tex), dr2.CardNormal(tex)))); sectionNames.Add($"objects:{key}");
+                sections.Add(s); mats.Add(MatPath(dr2!.CardMic(tex))); sectionNames.Add($"objects:{key}");
             }
             foreach (var cls in VisualObjects.Classes.Where(c => objSecs[c].Idx.Count > 0))
             {

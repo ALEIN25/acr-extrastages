@@ -647,14 +647,29 @@ internal sealed class Dr2Materials
                 ? MaskedMic("leaf_flat_" + diffuse, Texture(diffuse)) : Mic("leaf_flat_" + diffuse, Texture(diffuse));
         }
         if (mode != "speedtree") throw new InvalidDataException("Unknown vegetation.foliage_material: " + mode);
-        var colour = Texture(diffuse);
+        return LeafMic("leaf_" + diffuse, Texture(diffuse));
+    }
+
+    /// Far-tree card material: [vegetation] card_material = "leaf" draws the billboard strip with the foliage leaf MIC
+    /// (two-sided foliage shading, light through the leaves, flat normal) instead of the props masked MIC with DR2's billboard
+    /// normal strip, which lit the cards near black in game. "masked" keeps the old material.
+    public string CardMic(string cardDds)
+    {
+        var mode = _cfg["vegetation"].TryGetValue("card_material", out var v) && v is string s ? s : "masked";
+        if (mode == "leaf") return LeafMic("cardleaf_" + cardDds, CardTexture(cardDds));
+        if (mode != "masked") throw new InvalidDataException("vegetation.card_material must be masked or leaf");
+        return MaskedMic("card_" + cardDds, CardTexture(cardDds), CardNormal(cardDds));
+    }
+
+    string LeafMic(string name, string colour)
+    {
         // Flat RG normal and constant roughness in both remaining channels.
         var pixels = Enumerable.Range(0, 16).SelectMany(_ => new byte[] { 128, 128, 255, 255 }).ToArray();
         var encoder = new BCnEncoder.Encoder.BcEncoder(BCnEncoder.Shared.CompressionFormat.Bc3);
         encoder.OutputOptions.GenerateMipMaps = false;
         var packedNormal = Texture("leaf_flat_packed", Dds.Fmt.BC3, true, 4, 4,
             encoder.EncodeToRawBytes(pixels, 4, 4, BCnEncoder.Encoder.PixelFormat.Rgba32).ToList());
-        var path = MicFrom("leaf_mic_template", "leaf_" + diffuse, colour,
+        var path = MicFrom("leaf_mic_template", name, colour,
             [("leaf_mic_base_texture", colour), ("leaf_mic_normal_texture", packedNormal), ("leaf_mic_subsurface_texture", colour)]);
         MaskedMics.Add(path);
         return path;

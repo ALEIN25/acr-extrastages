@@ -103,6 +103,8 @@ bush_max_triangles = 100000000   # bushes (soft vegetation) within mid_m: thinne
 # three quarters is drawn (Fi: 48 trees, 65k triangles of 90k)
 card_brightness = 1.15          # far-tree cards: DR2's billboard strips read dark next to the real foliage; colour factor (1 = as DR2)
 card_dilate_px = 12             #   colour of the opaque texels is spread this far into the transparent ones (no dark fringes)
+card_material = "leaf"           #   leaf | masked: far-tree cards with the foliage leaf MIC (light through the leaves, flat normal); masked = props material + DR2 billboard normals (near black in game)
+card_normals = "up"             #   up | face: card normals tilted to the sky, one copy per side (face = horizontal card normal, dark under a high sun)
 
 [object_materials]
 # flat colours (SurfaceColor of each MI): trunks orange, wood yellow, metal violet (posts stay magenta), concrete blue,
