@@ -354,6 +354,13 @@ internal static class GroundLod
                 {
                     map[v] = nv = (uint)s.Pos.Count;
                     s.Pos.Add(terrain.Pos[(int)v]); s.Nrm.Add(terrain.Nrm[(int)v]);
+                    // Tile splitting changes UV0 only. Keep the road coordinates and
+                    // tangent frame identical on both sides of a section boundary.
+                    if (terrain.Tan.Count == terrain.Pos.Count) s.Tan.Add(terrain.Tan[(int)v]);
+                    if (terrain.Uv1.Count == terrain.Pos.Count) s.Uv1.Add(terrain.Uv1[(int)v]);
+                    if (terrain.Uv2.Count == terrain.Pos.Count) s.Uv2.Add(terrain.Uv2[(int)v]);
+                    if (terrain.Uv3.Count == terrain.Pos.Count) s.Uv3.Add(terrain.Uv3[(int)v]);
+                    s.Color = terrain.Color;
                     if (ti >= 0)
                     {
                         var tl = order[ti];

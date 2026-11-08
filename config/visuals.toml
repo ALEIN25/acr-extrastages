@@ -1,6 +1,9 @@
 # Interim visuals (stage-build --visuals, build.ps1 -Version v1.1+): render-only geometry written into a
 # ProceduralMeshComponent of the forward gameplay cell. See docs/decisions.md D6 (v1.1, v1.2) and D7 (v1.3 objects).
 
+[visuals]
+chunk_mode = "off"
+
 [road]
 # DR2 ground codes drawn with the road material; all other DR2 collision is drawn as terrain
 surfaces = ["GD0+", "CATG"]
@@ -232,7 +235,7 @@ ground_detail_strength = 1.5
 road_detail_m = 0.75
 # The paired road normal is a full road layer on DR2 road-aligned UVs, not a micro-detail.
 # Disable its world-planar repetition over the baked road; opt in with a nonzero strength.
-road_detail_strength = 0.0
+road_detail_strength = 2.0
 road_orm = [255, 178, 0]        # occlusion 1, roughness 0.7, metal 0
 max_size = 2048                 # mips larger than this are dropped
 # DR2's terrain colour maps (nz_01_a_0x_d, section_b) are grey-centred tints over a 17-slice detail array blended per
@@ -247,7 +250,8 @@ vista_layers = ["nz_ral_vista_grass_d", "nz_ral_vista_road_d", "nz_ral_vista_for
 vista_size = 2048
 # objects: render-mesh instances by DR2 material (TDiffuse*); these shaders are alpha-tested or blended (no masked
 # parent: M_Simple is opaque), their triangles keep the class colour
-object_skip_shaders = ["foliage", "decal", "blend", "glass", "water", "shadow"]
+object_skip_material_kinds = ["ground_ao", "shadow"] # Exclude helper geometry from every mesh path.
+object_skip_shaders = ["foliage", "decal", "blend", "glass", "water", "shadow", "ground_ao"]
 
 [checks]
 # Offline checks tuned on New Zealand that measure how closely the drawn ground / decoration follows DR2's collision mesh. On rocky

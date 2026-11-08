@@ -185,6 +185,29 @@ internal static class ColliderFit
         return (new V3(px + up.X * tc, py + up.Y * tc, zm + up.Z * tc), radius, len);
     }
 
+    // Keep the original axis and extent: reducing radius is a strict subset of
+    // the original capsule. Accept only when every sampled car-height surface
+    // is covered by the real trunk; missing sections fail closed.
+    internal static bool Covered(Vector3[] vertices, IReadOnlyList<uint> indices,
+        ObjectColliders.Capsule c, double baseZ, double limitCm)
+    {
+        var (up, ax, az) = Axes(c);
+        return Measure(vertices, indices, c.Center, ax, up, az,
+            c.Radius, c.Length, baseZ).All(g => g.Out <= limitCm);
+    }
+
+    static bool ShrinkToTrunk(Vector3[] vertices, IReadOnlyList<uint> indices,
+        ObjectColliders.Capsule c, double baseZ, double limitCm)
+    {
+        double original = c.Radius;
+        for (double radius = original; radius >= 5; radius -= 1)
+        {
+            c.Radius = radius;
+            if (Covered(vertices, indices, c, baseZ, limitCm)) return true;
+        }
+        c.Radius = original;
+        return false;
+    }
     static double Score(Vector3[] wv, IReadOnlyList<uint> idx, V3 centre, ObjectColliders.Capsule c, double radius, double length, double baseZ)
     {
         var (up, ax, az) = Axes(c);
@@ -432,3 +455,4 @@ internal static class ColliderFit
         return failures;
     }
 }
+

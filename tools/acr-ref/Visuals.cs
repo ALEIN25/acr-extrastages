@@ -440,10 +440,20 @@ internal static class Visuals
             // round 3, the real trees near the road: their foliage_trunk / foliage materials (ObjectDiffuse skips foliage shaders
             // for every other object) as "tree:" sections of VisualObjects.Build
             var treeDiffuse = new Dictionary<string, string?>();
+            var treeLeafKeys = new HashSet<string>();
+            var treeTemplates = JsonNode.Parse(File.ReadAllText(Path.Combine(ir.Dir, "stage.json")))!["objects"]!["templates"]!.AsObject();
+            bool RealTree(string template) => treeTemplates[template]?["bodies"]?.AsArray()
+                .SelectMany(b => b!["shapes"]!.AsArray()).Any(s =>
+                    (s!["shape_class"]?.GetValue<string>() ?? "").StartsWith("sSolidTree", StringComparison.Ordinal)) == true
+                || objects.Kept.Any(s => s.Template == template && s.Material == "PM_WallWoodTreeTrunks");
             string? TreeKey(string template, string mat, int tris)
             {
                 var k = ObjKey(template, mat, tris);
-                if (!treeDiffuse.TryGetValue(k, out var d)) treeDiffuse[k] = d = objJson.TryGetValue(k, out var j) ? dr2!.ObjectDiffuse(j, out _, foliage: true) : null;
+                if (!treeDiffuse.TryGetValue(k, out var d)) treeDiffuse[k] = d = objJson.TryGetValue(k, out var j)
+                    ? dr2!.ObjectDiffuse(j, out _, foliage: true) : null;
+                if (d is not null && RealTree(template) && objJson.TryGetValue(k, out var material)
+                    && (material["shader_group"]?.GetValue<string>() ?? "").Contains("foliage", StringComparison.OrdinalIgnoreCase)
+                    && TrunkOf(template, mat, tris) is null) treeLeafKeys.Add(k);
                 return d is not null ? k : null;
             }
             // vegetation "cards": a tree template's DR2 billboard, <template>_lod_d (the foliage_billboard.fx strip of views;
@@ -460,7 +470,8 @@ internal static class Visuals
             {
                 if (objByName is null) throw new ArgumentException("[instancing] needs --visuals-dr2 with the objects section on");
                 instancingPlan = dr2!.InstancingPlan ??= Instancing.Prepare(ir, pl, cfg, opt, dr2, inPhysicsBounds,
-                    (template, mat, tris) => TreeKey(template, mat, tris) is { } k ? (k, dr2!.TreeLeafMic(treeDiffuse[k]!)) : null,
+                    (template, mat, tris) => TreeKey(template, mat, tris) is { } k ? (k,
+                        treeLeafKeys.Contains(k) ? dr2!.TreeLeafMic(treeDiffuse[k]!) : dr2!.ObjectMic(treeDiffuse[k]!)) : null,
                     (template, mat, tris) => TrunkOf(template, mat, tris) is not null,
                     template => CardTexture(template) is { } cardTex ? (dr2!.MaskedMic("card_" + cardTex, dr2.CardTexture(cardTex), dr2.CardNormal(cardTex)), CardFrames(cardTex)) : null);
             }
@@ -495,7 +506,10 @@ internal static class Visuals
             }
             foreach (var (key, s) in objSecs.Where(kv => kv.Key.StartsWith(VisualObjects.TreePrefix) && kv.Value.Idx.Count > 0).OrderBy(kv => kv.Key))
             {
-                sections.Add(s); mats.Add(MatPath(dr2!.TreeLeafMic(treeDiffuse[key[VisualObjects.TreePrefix.Length..]]!))); sectionNames.Add($"objects:{key}");
+                var diffuse = treeDiffuse[key[VisualObjects.TreePrefix.Length..]]!;
+                var material = objJson[key[VisualObjects.TreePrefix.Length..]];
+                bool leaf = treeLeafKeys.Contains(key[VisualObjects.TreePrefix.Length..]);
+                sections.Add(s); mats.Add(MatPath(leaf ? dr2!.TreeLeafMic(diffuse) : dr2!.ObjectMic(diffuse))); sectionNames.Add($"objects:{key}");
             }
             // collider-less statics: the same materials, their own sections
             foreach (var (key, s) in objSecs.Where(kv => kv.Key.StartsWith(VisualObjects.StaticPrefix) && kv.Value.Idx.Count > 0).OrderBy(kv => kv.Key))
@@ -802,6 +816,61 @@ internal static class Visuals
         if (opt.Dr2On("objects"))
             for (int i = 0; i < sections.Count; i++)
                 if (sectionNames[i]!.GetValue<string>() is var sn && (sn.StartsWith("objects:") || sn is "posts" or "gates")) UvTangents(sections[i]);
+        string chunkMode = cfg.Str("visuals", "chunk_mode");
+        if (chunkMode == "") chunkMode = "off";
+        if (chunkMode is not ("off" or "two_existing")) throw new ArgumentException("visuals.chunk_mode must be off or two_existing");
+        JsonObject? farCarrier = null;
+        if (chunkMode == "two_existing")
+        {
+            if (opt.Host != "start" || opt.Owner is not null) throw new ArgumentException("two_existing requires the start host and native owners");
+            var route = new StageBuild.Polyline(ir.Centre.Select(pl.ToUe).ToList());
+            if (route.P.Count < 2 || route.Length <= 0) throw new InvalidDataException("Chunk route is empty");
+            var near = new List<ProcMesh.Section>(); var far = new List<ProcMesh.Section>();
+            var nearMats = new List<int>(); var farMats = new List<int>();
+            var nearNames = new JsonArray(); var farNames = new JsonArray();
+            var donor = ProcMesh.Parse(cell.GetExportData(other), other);
+            int cursor = donor.Slots[3].at, nativeCount = BitConverter.ToInt32(donor.Data, cursor); cursor += 4;
+            for (int i = 0; i < nativeCount; i++) { far.Add(ProcMesh.ReadSection(donor.Data, ref cursor, out _)); farNames.Add("native:ring:" + i); }
+            if (donor.Slots.TryGetValue(7, out var ms) && !ms.zero)
+                for (int i = 0; i < BitConverter.ToInt32(donor.Data, ms.at); i++) farMats.Add(BitConverter.ToInt32(donor.Data, ms.at + 4 + i * 4));
+            while (farMats.Count < nativeCount) farMats.Add(0);
+            var conservation = new JsonArray();
+            for (int i = 0; i < sections.Count; i++)
+            {
+                var src = sections[i]; var halves = new[] { new ProcMesh.Section { Color = src.Color, Collision = src.Collision }, new ProcMesh.Section { Color = src.Color, Collision = src.Collision } };
+                var maps = new[] { new Dictionary<uint, uint>(), new Dictionary<uint, uint>() };
+                for (int t = 0; t < src.Idx.Count; t += 3)
+                {
+                    var p = (src.Pos[(int)src.Idx[t]] + src.Pos[(int)src.Idx[t+1]] + src.Pos[(int)src.Idx[t+2]]) / 3;
+                    int side = route.Project(new Splines.V3(p.X, p.Y, p.Z)).s < route.Length / 2 ? 0 : 1;
+                    var dst = halves[side];
+                    for (int k = 0; k < 3; k++)
+                    {
+                        uint old = src.Idx[t+k];
+                        if (!maps[side].TryGetValue(old, out uint v))
+                        {
+                            v = (uint)dst.Pos.Count; maps[side][old] = v; dst.Pos.Add(src.Pos[(int)old]);
+                            void Copy<T>(List<T> a, List<T> b) { if (a.Count == src.Pos.Count) b.Add(a[(int)old]); }
+                            Copy(src.Nrm, dst.Nrm); Copy(src.Tan, dst.Tan); Copy(src.Uv, dst.Uv); Copy(src.Uv1, dst.Uv1); Copy(src.Uv2, dst.Uv2); Copy(src.Uv3, dst.Uv3);
+                        }
+                        dst.Idx.Add(v);
+                    }
+                }
+                if (halves.Sum(s => s.Idx.Count) != src.Idx.Count) throw new InvalidDataException("Chunk triangle conservation failed");
+                conservation.Add(new JsonObject { ["source"] = i, ["triangles"] = src.Idx.Count / 3, ["near"] = halves[0].Idx.Count / 3, ["far"] = halves[1].Idx.Count / 3 });
+                if (halves[0].Idx.Count > 0) { near.Add(halves[0]); nearMats.Add(mats[i]); nearNames.Add(sectionNames[i]!.DeepClone()); }
+                if (halves[1].Idx.Count > 0) { far.Add(halves[1]); farMats.Add(mats[i]); farNames.Add(sectionNames[i]!.DeepClone()); }
+            }
+            var farData = ProcMesh.BuildComponent(donor, far, farMats);
+            var readback = ProcMesh.Parse(farData, other); cursor = readback.Slots[3].at + 4;
+            for (int i = 0; i < nativeCount; i++) { var s = ProcMesh.ReadSection(farData, ref cursor, out _); if (s.Pos.Count != far[i].Pos.Count || s.Idx.Count != far[i].Idx.Count) throw new InvalidDataException("Native ring counts changed"); }
+            cell.SetExportData(other, farData);
+            farCarrier = new JsonObject { ["export"] = new JsonObject { ["name"] = cell.ExportName(other), ["class"] = cell.ExportClass(other), ["outer"] = cell.ExportName(cell.ExportOuter(other)-1) }, ["sections"] = farNames };
+            var bounds = ProcMesh.Bounds(far.SelectMany(s => s.Pos));
+            Console.WriteLine($"visuals: far carrier {other}: {far.Count} sections, {far.Sum(s => s.Idx.Count / 3)} triangles, bounds {bounds}");
+            r["chunk_conservation"] = conservation; r["chunk_mode"] = chunkMode;
+            sections = near; mats = nearMats; sectionNames = nearNames; r["sections"] = nearNames;
+        }
         var data = ProcMesh.BuildComponent(comp, sections, mats);
         if (opt.Preview is { } previewDir)
             r["preview"] = Preview.Write(previewDir, sections, mats, sectionNames, m => imported.First(kv => kv.Value == m).Key, dr2, ir, pl);
@@ -836,7 +905,12 @@ internal static class Visuals
             r["owner"] = $"re-parented to {cell.ExportName(owner)}, attached to its Root (export {root[0].index - 1})";
         }
         cell.SetExportData(e, data);
-
+        r["carriers"] = new JsonArray(new JsonObject {
+            ["export"] = new JsonObject { ["name"] = cell.ExportName(e), ["class"] = cell.ExportClass(e),
+                ["outer"] = cell.ExportName(cell.ExportOuter(e) - 1) },
+            ["sections"] = sectionNames.DeepClone()
+        });
+        if (farCarrier is not null) ((JsonArray)r["carriers"]!).Add(farCarrier);
         var allTerrain = bakeSections.Select(b => b.s).Prepend(terrain).ToList();
         r["terrain"] = $"{allTerrain.Sum(s => s.Pos.Count)} vertices, {allTerrain.Sum(s => s.Idx.Count / 3)} triangles" +
                        (bakeSections.Count > 0 ? $" in {allTerrain.Count} sections" : "");
@@ -853,6 +927,36 @@ internal static class Visuals
         return r;
     }
 
+    internal static List<(int Export, List<string>? Names)> Carriers(LegacyPackage cell, JsonNode? report)
+    {
+        if (report?["carriers"] is JsonArray carriers)
+            return carriers.Select(x => {
+                var id = x!["export"]!;
+                int e = Enumerable.Range(0, cell.ExportCount).Single(i =>
+                    cell.ExportName(i) == id["name"]!.GetValue<string>() &&
+                    cell.ExportClass(i) == id["class"]!.GetValue<string>() &&
+                    cell.ExportOuter(i) > 0 && cell.ExportName(cell.ExportOuter(i) - 1) == id["outer"]!.GetValue<string>());
+                return (e, (x["sections"] as JsonArray)?.Select(n => n!.GetValue<string>()).ToList());
+            }).ToList();
+        return [(Enumerable.Range(0, cell.ExportCount).Where(i => cell.ExportClass(i) == "ProceduralMeshComponent")
+            .MaxBy(i => cell.GetExportData(i).Length), (report?["sections"] as JsonArray)?.Select(n => n!.GetValue<string>()).ToList())];
+    }
+
+    internal static (List<ProcMesh.Section> Sections, List<string>? Names) Drawn(LegacyPackage cell, JsonNode? report)
+    {
+        var sections = new List<ProcMesh.Section>();
+        var names = new List<string>();
+        bool named = true;
+        foreach (var (e, ns) in Carriers(cell, report))
+        {
+            var c = ProcMesh.Parse(cell.GetExportData(e), e);
+            int p = c.Slots[3].at, n = BitConverter.ToInt32(c.Data, p); p += 4;
+            for (int i = 0; i < n; i++) sections.Add(ProcMesh.ReadSection(c.Data, ref p, out _));
+            named &= ns is not null && ns.Count == n;
+            if (ns is not null) names.AddRange(ns);
+        }
+        return (sections, named ? names : null);
+    }
     /// Offline check of the rebuilt component in a built (or round-tripped) cell.
     public static int Check(LegacyPackage cell, StageBuild.Ir ir, StageBuild.Placement pl, Toml cfg, Options opt, TextWriter w,
                             JsonNode? visualsReport = null, RoadProbe? probe = null, string? legacyRoot = null,
@@ -870,21 +974,21 @@ internal static class Visuals
     {
         int failures = 0;
         void C(bool ok, string what) { w.WriteLine($"{Advisory.Verdict(ok, what, out var bad)} {what}"); if (bad) failures++; }
-        var pmcs = Enumerable.Range(0, cell.ExportCount).Where(i => cell.ExportClass(i) == "ProceduralMeshComponent").ToList();
-        int e = pmcs.MaxBy(i => cell.GetExportData(i).Length);
-        var c = ProcMesh.Parse(cell.GetExportData(e), e);
-        int at = c.Slots[7].at, n = BitConverter.ToInt32(c.Data, at);
-        var names = (visualsReport?["sections"] as JsonArray)?.Select(x => x!.GetValue<string>()).ToList() ?? [];
         string root = (packageRootOverride ?? cfg.Str("dr2_textures", "package_root")).TrimEnd('/');
         string File(string pkg) => Path.Combine(legacyRoot, "acr", "Content", pkg["/Game/".Length..].Replace('/', Path.DirectorySeparatorChar) + ".uasset");
         var micPaths = new List<(string section, string path)>();
-        for (int i = 0; i < n; i++)
+        foreach (var (e, sectionNames) in Carriers(cell, visualsReport))
         {
-            int m = BitConverter.ToInt32(c.Data, at + 4 + 4 * i);
-            string path = m < 0 ? cell.ImportName(-cell.ImportOuter(-m - 1) - 1) : "";
-            micPaths.Add((i < names.Count ? names[i] : $"#{i}", path));
-        }
-        var expectDr2 = new Dictionary<string, bool>
+            var c = ProcMesh.Parse(cell.GetExportData(e), e);
+            int at = c.Slots[7].at, n = BitConverter.ToInt32(c.Data, at);
+            var names = sectionNames ?? [];
+            for (int i = 0; i < n; i++)
+            {
+                int m = BitConverter.ToInt32(c.Data, at + 4 + 4 * i);
+                string path = m < 0 ? cell.ImportName(-cell.ImportOuter(-m - 1) - 1) : "";
+                micPaths.Add((i < names.Count ? names[i] : $"#{i}", path));
+            }
+        }        var expectDr2 = new Dictionary<string, bool>
         {
             ["terrain"] = opt.Dr2On("terrain"), ["road"] = opt.Dr2On("road"), ["vista"] = opt.Dr2On("vista"),
         };
@@ -910,9 +1014,9 @@ internal static class Visuals
             // a round trip of our container alone cannot name the parent (another container): retoc writes it as
             // /Engine/UnknownPackage.UnknownExport; stage-verify resolves it to M_Simple through the game's containers
             var parent = Enumerable.Range(0, mp.ImportCount).FirstOrDefault(i => mp.ImportClassName(i) == "Material" && mp.ImportName(i) is "M_Simple" or "M_MasterMaskedSurfaces"
-                                                                                 || mp.ImportName(i) == "UnknownExport", -1);
+                                                                                 || mp.ImportName(i) == "M_SpeedTree" || mp.ImportName(i) == "UnknownExport", -1);
             bool ok = mp.ExportCount == 1 && mp.ExportClass(0) == "MaterialInstanceConstant" && mp.PackageName == mic && mp.ExportName(0) == mic[(mic.LastIndexOf('/') + 1)..]
-                      && texImports.Count is 3 or 4 && parent >= 0;   // 4: the ground bake's detail-normal template
+                      && (mic.StartsWith(root + "/Mat/MI_leaf_", StringComparison.Ordinal) ? texImports.Count == 3 : texImports.Count is 3 or 4) && parent >= 0;
             foreach (var t in texImports)
             {
                 string tp = mp.ImportName(-mp.ImportOuter(t) - 1);
@@ -935,7 +1039,7 @@ internal static class Visuals
             if (ok) micOk++; else problems.Add($"{mic}: MIC layout");
         }
         C(problems.Count == 0 && micOk == mics.Count && texOk == textures.Count && (mics.Count > 0) == Options.Dr2Sections.Any(opt.Dr2On),
-          $"dr2: {mics.Count} MICs (parent M_Simple, 3 or 4 texture imports each) and {textures.Count} textures resolve in the container; every mip inline at its data resource" +
+          $"dr2: {mics.Count} MICs (standard: 3 or 4 texture imports; SpeedTree leaves: 3) and {textures.Count} textures resolve in the container; every mip inline at its data resource" +
           (problems.Count > 0 ? $"; {string.Join("; ", problems.Take(5))}" : ""));
         return failures;
     }
@@ -946,7 +1050,9 @@ internal static class Visuals
         int failures = 0;
         void C(bool ok, string what) { w.WriteLine($"{Advisory.Verdict(ok, what, out var bad)} {what}"); if (bad) failures++; }
         var pmcs = Enumerable.Range(0, cell.ExportCount).Where(i => cell.ExportClass(i) == "ProceduralMeshComponent").ToList();
-        int e = pmcs.MaxBy(i => cell.GetExportData(i).Length);
+        var carriers = Carriers(cell, visualsReport);
+        foreach (var (e, _) in carriers)
+        {
         var c = ProcMesh.Parse(cell.GetExportData(e), e);
         string outerName = cell.ExportName(cell.ExportOuter(e) - 1);
         C(c.PropsEnd + 8 == c.Data.Length, $"visuals: mesh export {e} of {outerName} parses to its end ({c.Data.Length} bytes)");
@@ -955,9 +1061,9 @@ internal static class Visuals
         int start = TriggerActor(cell, "start"), end = TriggerActor(cell, "end");
         var refs = new[] { start, end }.Where(a =>
             Enumerable.Range(0, cell.GetExportData(a).Length - 3).Any(p => BitConverter.ToInt32(cell.GetExportData(a), p) == e + 1)).ToList();
-        if (opt.Retarget)
+        if (opt.Retarget && carriers.Count == 1)
         {
-            var ring = pmcs.Single(i => i != e);
+            var ring = pmcs.Single(i => !carriers.Any(x => x.Export == i));
             bool both = new[] { start, end }.All(a => cell.ExportDeps(a).Any(d => d.kind == "CBS" && d.index == ring + 1));
             C(refs.Count == 0 && both, $"visuals: neither trigger's MeshComponent references the visuals component (both use export {ring})");
         }
@@ -968,20 +1074,18 @@ internal static class Visuals
               && cell.ExportName(BitConverter.ToInt32(c.Data, c.Slots[124].at) - 1) == "Root",
               $"visuals: component owned by {cell.ExportName(ownerIdx)} (not a default subobject; created after it; attached to its Root)");
         else
-            C(ownerIdx == TriggerActor(cell, opt.Host),
+            C(ownerIdx == TriggerActor(cell, carriers.Count > 1 && e == TriggerMesh(cell, end) ? "end" : opt.Host),
               $"visuals: component owned by the {opt.Host} trigger ({outerName})");
         C(c.Slots.TryGetValue(142, out var hid) && hid.zero && c.Slots.ContainsKey(136) && c.Slots.ContainsKey(133),
           "visuals: bHiddenInGame = false, bVisible = true, absolute transform (world-space vertices)");
-        int p = c.Slots[3].at; int n = BitConverter.ToInt32(c.Data, p); p += 4;
-        var secs = new List<ProcMesh.Section>();
-        for (int i = 0; i < n; i++) secs.Add(ProcMesh.ReadSection(c.Data, ref p, out _));
-        var secNames = (visualsReport?["sections"] as JsonArray)?.Select(x => x!.GetValue<string>()).ToList();
-        // section 1 and, with the ground bake, every further tile section (terrain:<tile>, terrain:rest)
-        var terrainIdx = Enumerable.Range(0, n).Where(i => i == 1 || secNames is not null && i < secNames.Count && secNames[i].StartsWith("terrain:")).ToList();
+        }
+        var (secs, secNames) = Drawn(cell, visualsReport);
+        int n = secs.Count;        // section 1 and, with the ground bake, every further tile section (terrain:<tile>, terrain:rest)
+        var terrainIdx = Enumerable.Range(0, n).Where(i => (secNames is null ? i == 1 : secNames[i] == "terrain") || secNames is not null && i < secNames.Count && secNames[i].StartsWith("terrain:")).ToList();
         var terrainSecs = terrainIdx.Select(i => secs[i]).ToList();
         C(n >= 5 && secs.All(s => !s.Collision), $"visuals: {n} sections, none with collision ({string.Join(", ", secs.Select(s => $"{s.Pos.Count} v / {s.Idx.Count / 3} t"))})");
         C(secs.All(s => s.Idx.All(i => i < s.Pos.Count)) && secs.All(s => s.Idx.Count % 3 == 0 && s.Idx.Count > 0), "visuals: all indices in range, no empty section");
-        var mats = c.Slots.TryGetValue(7, out var m) && !m.zero ? BitConverter.ToInt32(c.Data, m.at) : 0;
+        var mats = carriers.Sum(x => { var c = ProcMesh.Parse(cell.GetExportData(x.Export), x.Export); return c.Slots.TryGetValue(7, out var m) && !m.zero ? BitConverter.ToInt32(c.Data, m.at) : 0; });
         C(mats == n, $"visuals: {mats} material slots, one per section (dummy, terrain = default, road, posts, gates{(n > 5 ? ", object classes" : "")})");
         long tris = secs.Sum(s => (long)s.Idx.Count / 3);
         double budget = cfg.Num("objects", "max_total_triangles");
@@ -995,7 +1099,7 @@ internal static class Visuals
         //     the road, the start gantry)
         //   crowns: not in the corridor in plan at any height
         // The gates' banner spans the road at gate_height_m by design and is not checked.
-        if (probe is not null && visualsReport?["sections"] is JsonArray names && names.Count == n)
+        if (probe is not null && secNames is { } names && names.Count == n)
         {
             double tol = cfg.Num("objects", "road_overlap_tolerance_m") * 100, overhang = cfg.Num("objects", "overhang_height_m") * 100;
             var colliders = (visualsReport["objects"]?["colliders_overhead_in_corridor"] as JsonArray ?? [])
@@ -1003,12 +1107,12 @@ internal static class Visuals
                               reach: x["reach_cm"]!.GetValue<double>())).ToList();
             // collider-less DR2 statics (walls, rock banks, signs): DR2 has their collision in the ground mesh, the gates' 12 m
             // corridor includes the verge they stand on; reported, not held to the limit
-            var groundStatics = names.Select(x => x!.GetValue<string>()).Where(x => x.StartsWith("objects:" + VisualObjects.StaticPrefix)).ToHashSet();
+            var groundStatics = names.Where(x => x.StartsWith("objects:" + VisualObjects.StaticPrefix)).ToHashSet();
             var overheadSecs = (visualsReport?["objects"]?["overhead_sections"] as JsonArray ?? []).Select(x => x!.GetValue<string>()).ToHashSet();
             int staticTris = 0; double staticDeepest = 0;
             for (int i = 0; i < n; i++)
             {
-                var name = names[i]!.GetValue<string>();
+                var name = names[i];
                 if (name is "dummy" or "terrain" or "road" or "gates" || name.StartsWith("instancing:keep:") || name.StartsWith("terrain:") || name.StartsWith("terrain_low:") || name == "terrain_gap" || name.StartsWith("road:")) continue;
                 if (name.StartsWith("proxy:"))
                 {
@@ -1070,8 +1174,8 @@ internal static class Visuals
             C(true, $"visuals road corridor: {colliders.Count} kept colliders reach over the road above car height (listed in the report)");
             if (groundStatics.Count > 0)
                 C(true, $"visuals road corridor: {groundStatics.Count} sections ({staticTris} triangles) of collider-less DR2 statics (collision in the DR2 ground) not held to the limit; deepest {staticDeepest / 100:0.00} m at car height");
-            C(opt.Vegetation is "crowns" or "cards" || !names.Any(x => x!.GetValue<string>() == "objects:soft"),
-              $"visuals: vegetation {opt.Vegetation}: {(names.Any(x => x!.GetValue<string>() == "objects:soft") ? "crown section present" : "no non-solid section")}");
+            C(opt.Vegetation is "crowns" or "cards" || !names.Any(x => x == "objects:soft"),
+              $"visuals: vegetation {opt.Vegetation}: {(names.Any(x => x == "objects:soft") ? "crown section present" : "no non-solid section")}");
             if (visualsReport["objects"] is { } or)
             {
                 double maxExt = cfg.Num("objects", "max_object_extent_m"), largest = or["largest_extent_m"]!.GetValue<double>();

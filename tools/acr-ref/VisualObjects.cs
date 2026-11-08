@@ -125,6 +125,8 @@ internal static class VisualObjects
         var sec = Classes.ToDictionary(c => c, _ => new ProcMesh.Section());
         var counts = Classes.ToDictionary(c => c, _ => 0);
 
+        var helperKinds = cfg.Arr("dr2_textures", "object_skip_material_kinds").Cast<string>().ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var removedHelpers = new Dictionary<string, int>();
         var meshes = new Dictionary<string, Mesh>();
         foreach (var g in new Glb(Path.Combine(ir.Dir, "render", "objects.glb")).Primitives(withUv: dr2Material is not null).GroupBy(p => p.Mesh))
         {
@@ -132,6 +134,12 @@ internal static class VisualObjects
             var matTris = new Dictionary<string, int>();
             foreach (var p in g)
             {
+                var kind = p.Material.Split('!')[0];
+                if (helperKinds.Contains(kind))
+                {
+                    removedHelpers[kind] = removedHelpers.GetValueOrDefault(kind) + p.Indices.Length / 3;
+                    continue;
+                }
                 uint b = (uint)pos.Count;
                 for (int i = 0; i < p.Positions.Length; i += 3) pos.Add(new Vector3(p.Positions[i], p.Positions[i + 1], p.Positions[i + 2]));
                 var t0 = p.Uv.Length > 0 ? p.Uv[0] : null;
@@ -140,6 +148,7 @@ internal static class VisualObjects
                 triMat.AddRange(Enumerable.Repeat(p.Material, p.Indices.Length / 3));
                 matTris[p.Material] = matTris.GetValueOrDefault(p.Material) + p.Indices.Length / 3;
             }
+            if (idx.Count == 0) continue;
             // round 3: the section key of each triangle's foliage_trunk / foliage material (null: not a tree material)
             string?[]? treeMat = null; bool[]? trunkTri = null;
             if (treeMaterial is not null)
@@ -163,6 +172,8 @@ internal static class VisualObjects
             foreach (var v in pos) { mn = Vector3.Min(mn, v); mx = Vector3.Max(mx, v); }
             meshes[g.Key] = new Mesh(pos.ToArray(), idx.ToArray(), mn, mx, uv.ToArray(), triMat.ToArray(), matTris, treeMat, trunkTri);
         }
+        foreach (var kind in helperKinds.OrderBy(x => x))
+            Console.WriteLine($"objects: removed helper {kind}: {removedHelpers.GetValueOrDefault(kind)} prototype triangles (before instancing)");
         // a tree template's own bark: the DR2 trunk texture of its foliage_trunk material (null: the trunks class texture)
         var barkCache = new Dictionary<string, string?>();
         string? Bark(string template)
@@ -1221,3 +1232,4 @@ internal static class VisualObjects
         for (int i = 0; i < 4; i++) { Tri(s, ring[i], ring[(i + 1) % 4], top, c); Tri(s, ring[i], ring[(i + 1) % 4], bot, c); }
     }
 }
+

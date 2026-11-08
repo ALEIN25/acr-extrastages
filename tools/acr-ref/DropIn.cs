@@ -276,7 +276,7 @@ internal sealed class Dr2Materials
                         else Array.Clear(data, at + pattern.Length, 4);
                         hits++;
                     }
-                if (hits == 0) throw new InvalidDataException($"{tpl}: cannot locate {parameter}");
+                if (hits == 0) Log.Add($"{tpl}: parameter {parameter} not found in the expected layout; left as in the template");
             }
             pkg.SetExportData(0, data);
         }

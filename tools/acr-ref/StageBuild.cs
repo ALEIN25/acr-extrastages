@@ -616,7 +616,7 @@ internal static class StageBuild
 
     // ---------------- gameplay cell ----------------
 
-    sealed class Polyline
+    internal sealed class Polyline
     {
         public readonly List<V3> P;
         public readonly double[] S;
@@ -1129,12 +1129,7 @@ internal static class StageBuild
         if (report["options"]?["visuals"]?.GetValue<string>() is { } invCfg && report["baked"]?["simple_added"] is { } invAdded)
         {
             var gcell = new LegacyPackage(HostPaths.Resolve(root, HostPaths.Cell));
-            int pmc = Enumerable.Range(0, gcell.ExportCount).Where(i => gcell.ExportClass(i) == "ProceduralMeshComponent").MaxBy(i => gcell.GetExportData(i).Length);
-            var comp = ProcMesh.Parse(gcell.GetExportData(pmc), pmc);
-            int sp = comp.Slots[3].at; int ns = BitConverter.ToInt32(comp.Data, sp); sp += 4;
-            var drawn = new List<ProcMesh.Section>();
-            for (int i = 0; i < ns; i++) drawn.Add(ProcMesh.ReadSection(comp.Data, ref sp, out _));
-            var secNames = (report["cell"]?["visuals"]?["sections"] as JsonArray)?.Select(x => x!.GetValue<string>()).ToList();
+            var (drawn, secNames) = Visuals.Drawn(gcell, report["cell"]?["visuals"]);
             var shapes = InvisibleCheck.SimpleShapes(data, simple, invAdded.GetValue<int>());
             Action<InvisibleCheck.Drawn, int>? instDraw = null; Func<InvisibleCheck.Shape, double?>? instBase = null;
             if (report["cell"]?["visuals"]?["instancing"] is { } instRep) (instDraw, instBase) = Instancing.FromCell(gcell, root, instRep);
