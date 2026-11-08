@@ -259,6 +259,27 @@ internal sealed class Dr2Materials
             }
             pkg.SetExportData(0, data);
         }
+        if (tplKey == "leaf_mic_template")
+        {
+            var data = pkg.GetExportData(0);
+            foreach (var parameter in new[] { "SharedBend", "SharedOscillation", "SharedSpeed", "SharedTurbulence", "SharedFlexibility", "Branch1Bend", "Branch1Oscillation", "Branch1Speed", "Branch1Turbulence", "Branch1Flexibility", "Branch2Bend", "Branch2Oscillation", "Branch2Speed", "Branch2Turbulence", "Branch2Flexibility", "RippleSpeed", "RippleFlexibility", "RippleShimmer", "CameraFadeEnable" })
+            {
+                int index = pkg.FindName(parameter);
+                if (index < 0) continue;
+                // FMaterialParameterInfo: FName, association byte, index int.
+                var pattern = BitConverter.GetBytes(index).Concat(new byte[5]).Concat(BitConverter.GetBytes(-1)).ToArray();
+                int hits = 0;
+                for (int at = 1; at + pattern.Length + 4 <= data.Length; at++)
+                    if (data.AsSpan(at, pattern.Length).SequenceEqual(pattern))
+                    {
+                        if (parameter == "CameraFadeEnable") data[at - 1] = 0;
+                        else Array.Clear(data, at + pattern.Length, 4);
+                        hits++;
+                    }
+                if (hits == 0) throw new InvalidDataException($"{tpl}: cannot locate {parameter}");
+            }
+            pkg.SetExportData(0, data);
+        }
         Rename(pkg.ExportName(0), Obj(path));
         Rename(pkg.PackageName, path);
         pkg.SetPackageName(path);
@@ -569,6 +590,24 @@ internal sealed class Dr2Materials
         var normal = ObjectNormal(diffuse);
         return Transparency(diffuse) > _cfg.Num("dr2_textures", "masked_min_transparent")
             ? MaskedMic("objm_" + diffuse, Texture(diffuse), normal) : Mic("obj_" + diffuse, Texture(diffuse), normal);
+    }
+
+    public string TreeLeafMic(string diffuse)
+    {
+        var mode = _cfg.Str("vegetation", "foliage_material");
+        if (mode == "masked") return ObjectMic(diffuse);
+        if (mode != "speedtree") throw new InvalidDataException("Unknown vegetation.foliage_material: " + mode);
+        var colour = Texture(diffuse);
+        // Flat RG normal and constant roughness in both remaining channels.
+        var pixels = Enumerable.Range(0, 16).SelectMany(_ => new byte[] { 128, 128, 255, 255 }).ToArray();
+        var encoder = new BCnEncoder.Encoder.BcEncoder(BCnEncoder.Shared.CompressionFormat.Bc3);
+        encoder.OutputOptions.GenerateMipMaps = false;
+        var packedNormal = Texture("leaf_flat_packed", Dds.Fmt.BC3, true, 4, 4,
+            encoder.EncodeToRawBytes(pixels, 4, 4, BCnEncoder.Encoder.PixelFormat.Rgba32).ToList());
+        var path = MicFrom("leaf_mic_template", "leaf_" + diffuse, colour,
+            [("leaf_mic_base_texture", colour), ("leaf_mic_normal_texture", packedNormal), ("leaf_mic_subsurface_texture", colour)]);
+        MaskedMics.Add(path);
+        return path;
     }
 
     /// The DR2 normal map paired with an object or class diffuse, as a BC5 texture package (null: flat normal).

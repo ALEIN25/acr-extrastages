@@ -392,6 +392,8 @@ internal sealed class Pipeline
             (@"acr\Content\Environments\MonteCarloS2Sisteron\TileableMaterials\MI_SisteronConcrete01", null),
             (@"acr\Content\Props\MonteCarloProps\MOnBolStoneWallB\MI_MonBolStoneWallC", null),   // M_Simple with a detail normal (ground bake)
             (@"acr\Content\Props\AlsaceBuildings\FraChaBldWarehouseA\MI_FraChaBldWarehouseAProps04_OP", null),   // masked, two-sided (cut-out textures)
+            (@"acr\Content\Foliage\Trees\SpruceWales\MI_SpruceWales06LeafMat", null),
+            (@"acr\Content\Foliage\Trees\SpruceWales\T_SpruceWalesLeaf", null),
             (@"acr\Content\Foliage\Trees\SpruceWales\SM_SpruceWales06", null),   // StaticMesh template of the [instancing] proof (config/visuals.toml)
         };
         foreach (var (rel, filter) in host)
@@ -615,3 +617,4 @@ internal sealed class Pipeline
         Ui.Line($"report -> {Path.Combine(_l.Batch, "report.md")}  ({sumText})");
     }
 }
+

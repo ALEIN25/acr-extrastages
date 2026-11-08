@@ -314,7 +314,8 @@ internal static class VisualObjects
                 instancedPlacements++; if (shapes.Count > 0) instancedSolid++;
                 continue;
             }
-            bool tree = IsTree(tname, shapes);
+            bool fence = tname.Contains("fence", StringComparison.OrdinalIgnoreCase);
+            bool tree = !fence && IsTree(tname, shapes);
 
             var before = sec.ToDictionary(kv => kv.Key, kv => kv.Value.Pos.Count);
             // DR2's own billboard (<template>_lod_d) as two crossed cards with its front and side views, turned by the
@@ -427,7 +428,7 @@ internal static class VisualObjects
             bool bush = !tree && shapes.Count > 0 && shapes.All(s => ClassOf(s.Material) == "soft");
             bool plant = shapes.Count == 0 && !tree;   // no collider of its own (soft vegetation: DR2 bushes the car drives through)
             bool midTier = (shapes.Count > 0 && (tree || bush) || plant) && midTrees.Contains(iid);
-            if (midTier) mesh = Mid(tname);
+            if (midTier && !fence) mesh = Mid(tname);
             // round 3b: a bush picked for the full or middle tier is drawn with its DR2 mesh instead of its card (below, as a tree)
             bool bushReal = (bush || plant) && (midTier || realTrees.Contains(iid)) && mesh?.TreeMat is not null;
             if (bush && !bushReal)
@@ -464,6 +465,23 @@ internal static class VisualObjects
                 if (dropN > 0) { drop = dropT; realClipped++; realClippedTris += dropN; }
                 ProcMesh.Section TreeSec(string key) => sec.TryGetValue(TreePrefix + key, out var ts) ? ts : sec[TreePrefix + key] = new ProcMesh.Section();
                 int added = AddMeshSplit(t => TreeSec(tmat[t]!), _ => true, mesh, m, Ue, t => tmat[t] is not null && (drop is null || !drop[t]));
+                // Fit only to triangles emitted above, including material and corridor filtering.
+                if (added > 0 && cfg.Num("objects", "precise_colliders") != 0 && objs.PreciseFitted.Add(inst["id"]!.GetValue<string>()))
+                {
+                    var triangles = Enumerable.Range(0, mesh.Idx.Length / 3)
+                        .Where(t => tmat[t] is not null && (drop is null || !drop[t]))
+                        .SelectMany(t => new[] { w[mesh.Idx[t * 3]], w[mesh.Idx[t * 3 + 1]], w[mesh.Idx[t * 3 + 2]] }).ToArray();
+                    foreach (var shape in shapes.ToArray().Where(s => s.Box is not null))
+                    {
+                        var replacements = PreciseColliders.Split(shape, triangles, fence ? 10 : cfg.Num("objects", "precise_cell_m") * 100, fence ? shape.Box!.Z + 100 : cfg.Num("objects", "precise_band_m") * 100, fence ? 4096 : (int)cfg.Num("objects", "precise_max_boxes"));
+                        if (replacements is null) { preciseKept++; continue; }
+                        objs.Kept.Remove(shape); objs.Kept.AddRange(replacements);
+                        shapes.Remove(shape); shapes.AddRange(replacements);
+                        preciseReplaced++; preciseBoxes += replacements.Count;
+                    }
+                }
+                // Retained capsules can exceed the fitted render trunk; show their bark explicitly.
+                if (tree) foreach (var shape in shapes.Where(s => s.Capsule is not null)) DrawShape(shape);
                 if (midTier) { midTris += added; midDrawn++; midPer[tname] = midPer.GetValueOrDefault(tname) + 1; }
                 else { realTris += added; realDrawn++; realPer[tname] = realPer.GetValueOrDefault(tname) + 1; }
             }
@@ -487,7 +505,7 @@ internal static class VisualObjects
                 perTemplate.TryAdd(tname, carded ? "tree: billboard cards and trunk shapes" : $"tree: trunk shapes, {crown}");
                 cardedPer[tname] = cardedPer.GetValueOrDefault(tname) + 1;
             }
-            else if (shapes.Count > 0 && mesh is not null && mesh.Idx.Length / 3 <= maxMeshTris
+            else if (shapes.Count > 0 && mesh is not null && (fence || mesh.Idx.Length / 3 <= maxMeshTris)
                      && MeshDepth(mesh, m, Ue, objs.Probe, overhang) is var depth && (depth <= meshPenLimit || overheadRe?.IsMatch(tname) == true || Fallback(tname, depth)))
             {
                 meshInstances++;
@@ -532,7 +550,7 @@ internal static class VisualObjects
                     var triangles = mesh.Idx.Select(i => Ue(Vector3.Transform(mesh.Pos[i], m))).ToArray();
                     foreach (var shape in shapes.ToArray().Where(s => s.Box is not null && !s.EnclosedFittedInterior))
                     {
-                        var replacements = PreciseColliders.Split(shape, triangles, cfg.Num("objects", "precise_cell_m") * 100, cfg.Num("objects", "precise_band_m") * 100, (int)cfg.Num("objects", "precise_max_boxes"));
+                        var replacements = PreciseColliders.Split(shape, triangles, fence ? 10 : cfg.Num("objects", "precise_cell_m") * 100, fence ? shape.Box!.Z + 100 : cfg.Num("objects", "precise_band_m") * 100, fence ? 4096 : (int)cfg.Num("objects", "precise_max_boxes"));
                         if (replacements is null) { preciseKept++; continue; }
                         objs.Kept.Remove(shape); objs.Kept.AddRange(replacements);
                         shapes.Remove(shape); shapes.AddRange(replacements);

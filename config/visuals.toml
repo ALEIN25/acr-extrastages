@@ -73,6 +73,7 @@ shape_min_fill = 0.8            # offline check: drawn shape bounds / collider b
                                 #   are inscribed; short tilted capsules fill ~0.84)
 
 [vegetation]
+foliage_material = "masked" # masked | speedtree (experimental)
 # round 3: trees whose origin is within near_m of the centreline are drawn with their real LOD0 mesh (foliage_trunk opaque, foliage
 # cut-out two-sided with its normal map) instead of cards + trunk stub, nearest first until near_max_triangles are used (budget);
 # farther trees keep the cards and a thin species-bark stub
@@ -143,6 +144,7 @@ min_distance_m = 50             # offline check: nearest vista vertex to the DR2
                                 #   comes to ~83 m on nz01r5)
 
 [ground]
+preserve_near_m = 60 # 0 restores previous terrain simplification
 # only with stage-build --visuals-ground render (build.ps1 v1.10): the terrain section is DR2's render terrain
 # (render/terrain.glb) instead of its collision ground, which covers only a ribbon along the road (acr-ref
 # terrain-compare: 43% of the ground within 60 m of the nz01r5 centreline has no collision triangle)
@@ -214,6 +216,10 @@ detail_mic_tiling = 10                            # the template's DetailNormalT
 detail_mic_strength = 3                           # the template's DetailNormalStrength, replaced by ground_detail_strength
 # object textures with transparent texels (wire fences, nets, cut-out signs): M_MasterMaskedSurfaces (masked, two-sided,
 # colour + opacity in one texture) instead of the opaque M_Simple, which drew the transparent parts black
+leaf_mic_template = "/Game/Foliage/Trees/SpruceWales/MI_SpruceWales06LeafMat"
+leaf_mic_base_texture = "T_SpruceWalesLeaf_B"
+leaf_mic_normal_texture = "T_SpruceWalesLeaf_N"
+leaf_mic_subsurface_texture = "T_SpruceWalesLeaf_SS"
 masked_mic_template = "/Game/Props/AlsaceBuildings/FraChaBldWarehouseA/MI_FraChaBldWarehouseAProps04_OP"
 masked_mic_base_texture = "T_FraChaBldWarehouseAProps04_B"     # Texture Color/Opacity
 masked_mic_orm_texture = "T_FraChaBldWarehouseAProps04_L"
@@ -224,7 +230,9 @@ ground_detail_m = 1.5                             # one detail-normal repeat eve
 ground_detail_strength = 1.5
 # round 1: the road bake tiles (their own detail scale, strength and ORM; the terrain keeps ground_detail_*)
 road_detail_m = 0.75
-road_detail_strength = 2.0
+# The paired road normal is a full road layer on DR2 road-aligned UVs, not a micro-detail.
+# Disable its world-planar repetition over the baked road; opt in with a nonzero strength.
+road_detail_strength = 0.0
 road_orm = [255, 178, 0]        # occlusion 1, roughness 0.7, metal 0
 max_size = 2048                 # mips larger than this are dropped
 # DR2's terrain colour maps (nz_01_a_0x_d, section_b) are grey-centred tints over a 17-slice detail array blended per
@@ -284,3 +292,4 @@ collider_gap_limit_cm = 25   # build check: collider and real trunk at 0.3 / 1.0
 
 [stage]
 finish_runout_m = 60
+

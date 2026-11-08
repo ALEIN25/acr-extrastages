@@ -6,7 +6,7 @@ internal static class PreciseColliders
     // Clip actual triangles to each voxel column, including vertical and thin surfaces.
     internal static List<ObjectColliders.Shape>? Split(ObjectColliders.Shape shape, V3[] triangles, double cell, double band, int cap)
     {
-        if (shape.Box is not { } b || cell <= 0 || band <= 0 || cap < 1) return null;
+        if (triangles.Length < 3 || shape.Box is not { } b || cell <= 0 || band <= 0 || cap < 1) return null;
         var (x, y, z) = ObjectColliders.RotationAxes(b.Rot[0], b.Rot[1], b.Rot[2]);
         double Dot(V3 a, V3 c) => a.X*c.X+a.Y*c.Y+a.Z*c.Z;
         var points = triangles.Select(p => { var d = p-b.Center; return new V3(Dot(d,x),Dot(d,y),Dot(d,z)); }).ToArray();

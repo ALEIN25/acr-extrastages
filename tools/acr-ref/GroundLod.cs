@@ -80,9 +80,9 @@ internal static class GroundLod
         }
     }
 
-    internal static (List<Vector3> pos, List<uint> idx, JsonObject report) Simplify(ProcMesh.Section s, RouteDistance route, Func<double, double> tolCm)
+    internal static (List<Vector3> pos, List<uint> idx, JsonObject report) Simplify(ProcMesh.Section s, RouteDistance route, Func<double, double> tolCm, double preserveNearM = 0)
     {
-        var (pos, idx, _, rep) = SimplifyCore(s, route, tolCm, null, 0);
+        var (pos, idx, _, rep) = SimplifyCore(s, route, tolCm, null, 0, preserveNearM: preserveNearM);
         return (pos, idx, rep);
     }
 
@@ -98,7 +98,7 @@ internal static class GroundLod
     }
 
     static (List<Vector3> pos, List<uint> idx, List<Vector2> uv, JsonObject report) SimplifyCore(
-        ProcMesh.Section s, RouteDistance? route, Func<double, double>? tolCm, IReadOnlyList<Vector2>? uvIn, int targetTris, bool quiet = false)
+        ProcMesh.Section s, RouteDistance? route, Func<double, double>? tolCm, IReadOnlyList<Vector2>? uvIn, int targetTris, bool quiet = false, double preserveNearM = 0)
     {
         var clock = System.Diagnostics.Stopwatch.StartNew();
         void Log(string m) { if (!quiet) Console.WriteLine(m); }
@@ -140,6 +140,13 @@ internal static class GroundLod
         Log($"visuals: ground simplify {edgeUse.Count} edges, {clock.Elapsed.TotalSeconds:0.0} s");
         var locked = new bool[nV];
         foreach (var (e, n) in edgeUse) if (n != 2) { locked[(int)(e >> 32)] = true; locked[(int)(e & 0xFFFFFFFF)] = true; }
+
+        int protectedVertices = 0;
+        if (route is not null && preserveNearM > 0)
+            for (int v = 0; v < nV; v++)
+                if (route.Metres(new Vector2(P[v].X, P[v].Y)) <= preserveNearM)
+                { locked[v] = true; protectedVertices++; }
+        Log($"visuals: ground preserve {protectedVertices} vertices within {preserveNearM:0.0} m of route");
 
         // quadrics (symmetric 4x4: a2 ab ac ad b2 bc bd c2 cd d2), in metres
         var Q = new double[nV * 10]; var W = new double[nV];

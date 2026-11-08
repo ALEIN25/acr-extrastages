@@ -136,7 +136,7 @@ internal static class Visuals
         {
             if (opt.Ground != "render") throw new ArgumentException("--visuals-ground-lod needs --visuals-ground render");
             var route = new GroundLod.RouteDistance(ir.Centre.Select(pl.ToUe).Select(q => new Vector2((float)q.X, (float)q.Y)));
-            var (sp, si, srep) = GroundLod.Simplify(terrain, route, GroundLod.Tolerance(cfg));
+            var (sp, si, srep) = GroundLod.Simplify(terrain, route, GroundLod.Tolerance(cfg), cfg["ground"].TryGetValue("preserve_near_m", out var preserveNear) ? Convert.ToDouble(preserveNear) : 0);
             terrain = new ProcMesh.Section();
             foreach (var p in sp) { terrain.Pos.Add(p); terrain.Nrm.Add(Vector3.Zero); terrain.Uv.Add(new Vector2(p.X / 400, p.Y / 400)); }
             for (int t = 0; t + 2 < si.Count; t += 3) AddTriKeep(terrain, (int)si[t], (int)si[t + 1], (int)si[t + 2]);
@@ -460,7 +460,7 @@ internal static class Visuals
             {
                 if (objByName is null) throw new ArgumentException("[instancing] needs --visuals-dr2 with the objects section on");
                 instancingPlan = dr2!.InstancingPlan ??= Instancing.Prepare(ir, pl, cfg, opt, dr2, inPhysicsBounds,
-                    (template, mat, tris) => TreeKey(template, mat, tris) is { } k ? (k, dr2!.ObjectMic(treeDiffuse[k]!)) : null,
+                    (template, mat, tris) => TreeKey(template, mat, tris) is { } k ? (k, dr2!.TreeLeafMic(treeDiffuse[k]!)) : null,
                     (template, mat, tris) => TrunkOf(template, mat, tris) is not null,
                     template => CardTexture(template) is { } cardTex ? (dr2!.MaskedMic("card_" + cardTex, dr2.CardTexture(cardTex), dr2.CardNormal(cardTex)), CardFrames(cardTex)) : null);
             }
@@ -495,7 +495,7 @@ internal static class Visuals
             }
             foreach (var (key, s) in objSecs.Where(kv => kv.Key.StartsWith(VisualObjects.TreePrefix) && kv.Value.Idx.Count > 0).OrderBy(kv => kv.Key))
             {
-                sections.Add(s); mats.Add(MatPath(dr2!.ObjectMic(treeDiffuse[key[VisualObjects.TreePrefix.Length..]]!))); sectionNames.Add($"objects:{key}");
+                sections.Add(s); mats.Add(MatPath(dr2!.TreeLeafMic(treeDiffuse[key[VisualObjects.TreePrefix.Length..]]!))); sectionNames.Add($"objects:{key}");
             }
             // collider-less statics: the same materials, their own sections
             foreach (var (key, s) in objSecs.Where(kv => kv.Key.StartsWith(VisualObjects.StaticPrefix) && kv.Value.Idx.Count > 0).OrderBy(kv => kv.Key))
@@ -729,6 +729,12 @@ internal static class Visuals
             }
             int proxied = colliders.Count(x => x.hull[0]);
             r["colliders_drawn_as_proxy"] = proxied;
+            var proxyPerTemplate = colliders.Where(x => x.hull[0] || x.lid[0]).GroupBy(x => x.s.Template)
+                .OrderByDescending(g => g.Count()).ThenBy(g => g.Key).ToArray();
+            var proxyTemplateReport = new JsonObject();
+            foreach (var g in proxyPerTemplate) proxyTemplateReport[g.Key] = g.Count();
+            r["colliders_drawn_as_proxy_per_template"] = proxyTemplateReport;
+            Console.WriteLine("visuals: top stand-in templates: " + string.Join(", ", proxyPerTemplate.Take(10).Select(g => $"{g.Key}: {g.Count()}")));
             r["proxy"] = new JsonObject
             {
                 ["colliders"] = proxied, ["with_lid"] = colliders.Count(x => x.lid[0]), ["lid_strips"] = proxyLids, ["triangles"] = proxyTris, ["candidates"] = colliders.Count,
@@ -2144,3 +2150,4 @@ internal static class Visuals
         Quad(s, a - up, b - up, b + up, a + up, -n);
     }
 }
+
