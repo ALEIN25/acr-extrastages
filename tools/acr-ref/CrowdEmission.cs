@@ -122,7 +122,9 @@ internal static class CrowdEmission
         {
             var xyz = spot!["ue_cm"]!.AsArray().Select(x => x!.GetValue<double>()).ToArray();
             var target = route.At(route.Project(new(xyz[0], xyz[1], xyz[2])).s, 0, 0, out _);
-            double yaw = Math.Atan2(target.Y - xyz[1], target.X - xyz[0]);
+            // template frame (Hafren cell 0SEK): root +X runs along the road with the road on its +Y side (root yaw -77.1,
+            // road heading -78.1, road 45 degrees to the left); so the root faces 90 degrees right of the direction to the road
+            double yaw = Math.Atan2(target.Y - xyz[1], target.X - xyz[0]) - Math.PI / 2;
             var offsets = translations.Select(at => new Vector2((float)(Read(at) * Math.Cos(yaw) - Read(at + 8) * Math.Sin(yaw)),
                 (float)(Read(at) * Math.Sin(yaw) + Read(at + 8) * Math.Cos(yaw)))).ToArray();
             // Sample a 50 cm grid across the group's full bounding footprint, as well as each foot.
@@ -173,7 +175,7 @@ internal static class CrowdEmission
             var pos = new V3(xyz[0], xyz[1], xyz[2]);
             var line = new StageBuild.Polyline(centre.ToList()); var projection = line.Project(pos);
             var target = line.At(projection.s, 0, 0, out _);
-            double yaw = Math.Atan2(target.Y - pos.Y, target.X - pos.X) * 180 / Math.PI;
+            double yaw = Math.Atan2(target.Y - pos.Y, target.X - pos.X) * 180 / Math.PI - 90;   // template frame, see Accept
             foreach (int e in graph)
             {
                 var entry = src.ExportEntry(e); var data = (byte[])src.GetExportData(e).Clone(); int p = 0;

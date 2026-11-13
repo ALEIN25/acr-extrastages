@@ -92,7 +92,7 @@ internal static class GroundCoverSelfTest
         var (sections, report) = GroundCover.Build(ir, pl, cfg, _ => true, dr2, ground);
         var plants = sections.Values.SelectMany(s => s.Pos).ToArray();
         var prototypes = GroundCover.LoadPrototypes(dir, dr2);
-        Check(prototypes.Count == 2 && prototypes[0].Triangles == 8 && prototypes[1].Triangles == 1
+        Check(prototypes.Count == 2 && prototypes[0].Triangles == 4 && prototypes[1].Triangles == 1
             && Math.Abs(prototypes[0].Radius - 40) < .01f, "node hierarchy, scale, palette rebasing and real triangle costs");
         // Asymmetric alpha catches an accidental V flip: top rows transparent, bottom rows opaque.
         dds[129] = 255;
@@ -105,17 +105,17 @@ internal static class GroundCoverSelfTest
         Array.Clear(dds, 129, 7);
         foreach (var name in new[] { "test_grass_d", "test_clutter_d" }) File.WriteAllBytes(Path.Combine(dir, "textures", name + ".dds"), dds);
         Check(sections.Count == 2 && report["prototypes_used"]!.GetValue<int>() == 2
-            && sections["test_grass_d"].Idx.Count % 24 == 0
+            && sections["test_grass_d"].Idx.Count % 12 == 0
             && sections["test_clutter_d"].Idx.Count % 3 == 0
-            && sections.Values.Sum(s => s.Idx.Count / 3) == report["triangles"]!.GetValue<int>(), "both prototypes/materials; crossed double-sided billboard and original clutter");
+            && sections.Values.Sum(s => s.Idx.Count / 3) == report["triangles"]!.GetValue<int>(), "both prototypes/materials; crossed two-sided billboard and original clutter");
         Check(sections.Values.All(s => s.Uv.All(uv => uv.X >= .6f && uv.X <= .8f && uv.Y >= .1f && uv.Y <= .3f)), "atlas UV rectangle preserved");
         Check(plants.Length > 0 && report["triangles"]!.GetValue<int>() <= 800, "nonempty and within budget");
         Check(plants.All(p => road.Query(p.X, p.Y).clearance >= 199.99 && road.Query(p.X, p.Y).clearance <= 4000.01), "entire footprint outside road, within 2..40 m band");
         Check(sections.All(pair => {
-            int stride = pair.Key == "test_grass_d" ? 16 : 4;
+            int stride = pair.Key == "test_grass_d" ? 8 : 4;
             return Enumerable.Range(0, pair.Value.Pos.Count / stride).All(i => {
                 var a = pair.Value.Pos[i * stride]; var b = pair.Value.Pos[i * stride + 1];
-                float width = Vector3.Distance(a, b), original = stride == 16 ? 80 : 40;
+                float width = Vector3.Distance(a, b), original = stride == 8 ? 80 : 40;
                 return Math.Abs(a.Z - ((a.X + b.X) * .05f + 202)) < .01f && width / original >= .7999f && width / original <= 1.2501f;
             });
         }), "bases follow drawn terrain 2 m above collision, plus 2 cm; scale 0.8..1.25");
@@ -124,8 +124,8 @@ internal static class GroundCoverSelfTest
         Check(plants.SequenceEqual(again.sections.Values.SelectMany(s => s.Pos)), "deterministic scatter");
         Check(GroundCover.Build(ir, pl, Config("off"), _ => true, null, ground).sections.Count == 0, "off needs no materials");
         Check(GroundCover.Build(ir, pl, Config("scatter", 0), _ => true, dr2, ground).sections.Count == 0, "zero budget");
-        var tiny = GroundCover.Build(ir, pl, Config("scatter", 7), _ => true, dr2, ground);
-        Check(tiny.report["triangles"]!.GetValue<int>() <= 7 && !tiny.sections.ContainsKey("test_grass_d"), "small budget excludes costly prototypes");
+        var tiny = GroundCover.Build(ir, pl, Config("scatter", 3), _ => true, dr2, ground);
+        Check(tiny.report["triangles"]!.GetValue<int>() <= 3 && !tiny.sections.ContainsKey("test_grass_d"), "small budget excludes costly prototypes");
         Check(GroundCover.Build(ir, pl, Config("scatter", 800, 0), _ => true, dr2, ground).sections.Count == 0, "zero density");
         Check(GroundCover.Build(ir, pl, cfg, _ => false, dr2, ground).sections.Count == 0, "physics bounds rejection");
         Check(GroundCover.Build(ir, pl, cfg, _ => true, dr2, new Visuals.TopSurface()).sections.Count == 0,
@@ -138,7 +138,7 @@ internal static class GroundCoverSelfTest
             ]}}
             """);
         var ornaments = GroundCover.Build(ir, pl, Config("ornaments"), _ => true, dr2, ground);
-        Check(ornaments.report["instances"]!.GetValue<int>() == 1 && ornaments.report["triangles"]!.GetValue<int>() is 1 or 8,
+        Check(ornaments.report["instances"]!.GetValue<int>() == 1 && ornaments.report["triangles"]!.GetValue<int>() is 1 or 4,
             "ornament plant anchors only; road plant rejected");
         dds[128] = 255; File.WriteAllBytes(Path.Combine(dir, "textures", "test_grass_d.dds"), dds);
         File.WriteAllBytes(Path.Combine(dir, "textures", "test_clutter_d.dds"), dds);
@@ -161,10 +161,10 @@ internal static class GroundCoverSelfTest
             var real = GroundCover.LoadPrototypes(finland, new Dr2Materials(cfg, finland, dir, dir));
             GroundCover.CheckAlpha(finland, real);
             Console.WriteLine($"Finland prototype inventory: {real.Count}, {real.Sum(p => p.Triangles)} triangles, {real.Count(p => p.Weight > 1)} grass-weighted, max radius {real.Select(p => p.Radius).DefaultIfEmpty().Max():0.##} cm");
-            Check(real.Count == 78 && real.Sum(p => p.Triangles) == 1828
+            Check(real.Count == 78 && real.Sum(p => p.Triangles) == 1580
                 && real.SelectMany(p => p.Parts).Select(p => p.Texture).Distinct().Count() == 2
                 && real.Any(p => p.Weight > 1) && real.All(p => p.Weight > 0 && p.Radius < 200),
-                "Finland: all 78 prototypes, 1828 emitted triangles, both atlases, grass bias and local footprints");
+                "Finland: all 78 prototypes, 1580 emitted triangles, both atlases, grass bias and local footprints");
         }
         return failures == 0 ? 0 : 1;
     }

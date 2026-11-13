@@ -222,13 +222,18 @@ internal sealed class Dr2Materials
         return Mic("cls_neutral", Texture("neutral_grey", Dds.Fmt.BC1, false, 4, 4, [Dds.EncodeBc1(px, 4, 4)]));
     }
 
-    /// Lakes and rivers: an opaque, glossy flat-colour MIC ([water] colour and orm); the engine's reflections do the rest.
-    public string WaterMic(IReadOnlyList<byte> rgb, IReadOnlyList<byte> orm)
+    /// Lakes and rivers: a clone of ACR's only surface water, MI_LoutrakiOcean (parent /Game/Environments/RallyShared/Materials/
+    /// M_Water: opaque, three scrolling world-space normal maps, SSR and Fresnel; no UVs needed). [water] colour (linear RGB)
+    /// replaces its WaterColor and wave_size its WaveSize (the template values below, each present once in the export).
+    public string WaterMic(IReadOnlyList<double> linear, double waveSize)
     {
-        byte[] Solid(IReadOnlyList<byte> c) { var px = new byte[16 * 4]; for (int i = 0; i < 16; i++) { px[i * 4] = c[0]; px[i * 4 + 1] = c[1]; px[i * 4 + 2] = c[2]; px[i * 4 + 3] = 255; } return px; }
-        var colour = Texture("water_colour", Dds.Fmt.BC1, false, 4, 4, [Dds.EncodeBc1(Solid(rgb), 4, 4)]);
-        var ormTex = Texture("water_orm", Dds.Fmt.BC1, true, 4, 4, [Dds.EncodeBc1(Solid(orm), 4, 4)]);
-        return MicFrom("mic_template", "water", colour, [("mic_base_texture", colour), ("mic_orm_texture", ormTex), ("mic_normal_texture", Normal())]);
+        // preview / gallery colour only: the same colour as an sRGB swatch
+        byte S(double v) => (byte)Math.Clamp(Math.Round(255 * (v <= .0031308 ? 12.92 * v : 1.055 * Math.Pow(v, 1 / 2.4) - .055)), 0, 255);
+        var px = new byte[16 * 4];
+        for (int i = 0; i < 16; i++) { px[i * 4] = S(linear[0]); px[i * 4 + 1] = S(linear[1]); px[i * 4 + 2] = S(linear[2]); px[i * 4 + 3] = 255; }
+        var swatch = Texture("water_colour", Dds.Fmt.BC1, false, 4, 4, [Dds.EncodeBc1(px, 4, 4)]);
+        return MicFrom("water_mic_template", "water", swatch, [],
+            [(0.03814f, (float)linear[0]), (0.130685f, (float)linear[1]), (0.197917f, (float)linear[2]), (3000f, (float)waveSize)]);
     }
 
     /// The DR2 trunk diffuse (<template>_tr_d, foliage_trunk.fx) of a material, null if it is not a trunk material or the

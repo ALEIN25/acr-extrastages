@@ -120,9 +120,9 @@ internal static class GroundCover
                 Vector3 P(uint v) { var q = pl.ToUe(new[] { (double)prim.Positions[v * 3], prim.Positions[v * 3 + 1], prim.Positions[v * 3 + 2] }); return new((float)q.X, (float)q.Y, (float)q.Z); }
                 for (int t = 0; t < prim.Indices.Length; t += 3)
                 {
-                    // physics bounds are tested in DR2 metres (StageBuild.InPhysicsBounds), not on the UE point
                     uint i0 = prim.Indices[t], i1 = prim.Indices[t + 1], i2 = prim.Indices[t + 2];
-                    if (!inBounds(new((prim.Positions[i0 * 3] + prim.Positions[i1 * 3] + prim.Positions[i2 * 3]) / 3.0, (prim.Positions[i0 * 3 + 1] + prim.Positions[i1 * 3 + 1] + prim.Positions[i2 * 3 + 1]) / 3.0, (prim.Positions[i0 * 3 + 2] + prim.Positions[i1 * 3 + 2] + prim.Positions[i2 * 3 + 2]) / 3.0))) continue;
+                    // physics bounds take physics metres (pl.ToPhysics of the DR2 point), as every other caller passes them
+                    if (!inBounds(pl.ToPhysics((prim.Positions[i0 * 3] + prim.Positions[i1 * 3] + prim.Positions[i2 * 3]) / 3.0, (prim.Positions[i0 * 3 + 1] + prim.Positions[i1 * 3 + 1] + prim.Positions[i2 * 3 + 1]) / 3.0, (prim.Positions[i0 * 3 + 2] + prim.Positions[i1 * 3 + 2] + prim.Positions[i2 * 3 + 2]) / 3.0))) continue;
                     var a = P(i0); var b = P(i1); var c = P(i2);
                     var cross = Vector3.Cross(b - a, c - a);
                     if (cross.LengthSquared() < 1 || Math.Abs(cross.Z) / cross.Length() < 0.65) continue;
@@ -164,7 +164,7 @@ internal static class GroundCover
             {
                 if (budget - triangleCount < minTriangles) break;
                 var p = Vector3.Transform(Vector3.Zero, ObjectColliders.Trs(instance!["transform"]));
-                if (!inBounds(new(p.X, p.Y, p.Z))) { rejected++; continue; }
+                if (!inBounds(pl.ToPhysics(p.X, p.Y, p.Z))) { rejected++; continue; }
                 var q = pl.ToUe(new[] { (double)p.X, p.Y, p.Z });
                 Place(new((float)q.X, (float)q.Y, (float)q.Z));
             }
@@ -291,7 +291,9 @@ internal static class GroundCover
             }
             if (parts.Count == 0) continue;
             float radius = parts.SelectMany(p => p.Positions).Max(p => new Vector2(p.X, p.Y).Length());
-            int triangles = parts.Sum(p => p.Indices.Length / 3 * (p.Billboard ? 4 : 1));
+            // The leaf MIC derives from leaf_mic_template, a two-sided foliage material. Backface copies
+            // are therefore redundant; keep the two crossed cards but emit each card once.
+            int triangles = parts.Sum(p => p.Indices.Length / 3 * (p.Billboard ? 2 : 1));
             // Finland's upper-right atlas patches are grass tufts; names alone are opaque (t01-01 etc).
             // Modest bias keeps every flower, shrub, fern and clutter mesh eligible.
             bool grass = prims.Any(p => p.Mesh.Contains("grass", StringComparison.OrdinalIgnoreCase)) || parts.Any(p => p.Billboard
@@ -306,22 +308,21 @@ internal static class GroundCover
         for (int copy = 0; copy < (part.Billboard ? 2 : 1); copy++)
         {
             var rotation = Matrix4x4.CreateRotationZ(copy * MathF.PI / 2) * yaw;
-            for (int face = 0; face < (part.Billboard ? 2 : 1); face++)
             {
                 uint start = (uint)s.Pos.Count;
                 for (int i = 0; i < part.Positions.Length; i++)
                 {
                     s.Pos.Add(anchor + Vector3.Transform(part.Positions[i] * scale, rotation));
-                    var n = Vector3.TransformNormal(part.Normals[i], rotation) * (face == 0 ? 1 : -1);
+                    var n = Vector3.TransformNormal(part.Normals[i], rotation);
                     s.Nrm.Add(Vector3.Normalize(n * 0.35f + Vector3.UnitZ));
                     s.Uv.Add(part.Uv[i]);
                 }
-                // X,Z,Y mirrors glTF CCW into UE clockwise; only reverse back faces.
+                // X,Z,Y mirrors glTF CCW into UE clockwise.
                 for (int t = 0; t < part.Indices.Length; t += 3)
                 {
                     s.Idx.Add(start + part.Indices[t]);
-                    s.Idx.Add(start + part.Indices[t + (face == 0 ? 1 : 2)]);
-                    s.Idx.Add(start + part.Indices[t + (face == 0 ? 2 : 1)]);
+                    s.Idx.Add(start + part.Indices[t + 1]);
+                    s.Idx.Add(start + part.Indices[t + 2]);
                 }
             }
         }

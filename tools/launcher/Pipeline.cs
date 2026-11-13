@@ -393,6 +393,7 @@ internal sealed class Pipeline
             (@"acr\Content\Effects\Vehicles\Skid\T_SkidDebug_N", null),
             (@"acr\Content\Environments\MonteCarloS2Sisteron\TileableMaterials\MI_SisteronConcrete01", null),
             (@"acr\Content\Props\MonteCarloProps\MOnBolStoneWallB\MI_MonBolStoneWallC", null),   // M_Simple with a detail normal (ground bake)
+            (@"acr\Content\Environments\GreeceS4Loutraki\TerrainMaterial\MI_LoutrakiOcean", null),   // M_Water child (lakes, [water])
             (@"acr\Content\Props\AlsaceBuildings\FraChaBldWarehouseA\MI_FraChaBldWarehouseAProps04_OP", null),   // masked, two-sided (cut-out textures)
             (@"acr\Content\Foliage\Trees\SpruceWales\MI_SpruceWales06LeafMat", null),
             (@"acr\Content\Foliage\Trees\SpruceWales\T_SpruceWalesLeaf", null),

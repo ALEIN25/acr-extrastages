@@ -841,8 +841,7 @@ internal static class Visuals
             {
                 int at = Enumerable.Range(0, sectionNames.Count).FirstOrDefault(i => sectionNames[i]!.GetValue<string>() == "vista", sectionNames.Count);
                 sections.Insert(at, water);
-                mats.Insert(at, MatPath(dr2.WaterMic(cfg.Arr("water", "colour").Select(x => Convert.ToByte(x)).ToArray(),
-                    cfg.Arr("water", "orm").Select(x => Convert.ToByte(x)).ToArray())));
+                mats.Insert(at, MatPath(dr2.WaterMic(cfg.Arr("water", "colour").Select(Convert.ToDouble).ToArray(), cfg.Num("water", "wave_size"))));
                 sectionNames.Insert(at, "water");
             }
             r["water"] = new JsonObject { ["triangles"] = water.Idx.Count / 3, ["bounds"] = water.Pos.Count == 0 ? null : ProcMesh.Bounds(water.Pos).ToString() };
@@ -1105,10 +1104,11 @@ internal static class Visuals
             var texImports = Enumerable.Range(0, mp.ImportCount).Where(i => mp.ImportClassName(i) == "Texture2D").ToList();
             // a round trip of our container alone cannot name the parent (another container): retoc writes it as
             // /Engine/UnknownPackage.UnknownExport; stage-verify resolves it to M_Simple through the game's containers
-            var parent = Enumerable.Range(0, mp.ImportCount).FirstOrDefault(i => mp.ImportClassName(i) == "Material" && mp.ImportName(i) is "M_Simple" or "M_MasterMaskedSurfaces"
+            var parent = Enumerable.Range(0, mp.ImportCount).FirstOrDefault(i => mp.ImportClassName(i) == "Material" && mp.ImportName(i) is "M_Simple" or "M_MasterMaskedSurfaces" or "M_Water"
                                                                                  || mp.ImportName(i) == "M_SpeedTree" || mp.ImportName(i) == "UnknownExport", -1);
             bool ok = mp.ExportCount == 1 && mp.ExportClass(0) == "MaterialInstanceConstant" && mp.PackageName == mic && mp.ExportName(0) == mic[(mic.LastIndexOf('/') + 1)..]
-                      && (mic.StartsWith(root + "/Mat/MI_leaf_", StringComparison.Ordinal) ? texImports.Count == 3 : texImports.Count is 3 or 4) && parent >= 0;
+                      && (mic == root + "/Mat/MI_water" ? texImports.Count == 0   // [water]: M_Water child, its normal maps are in the graph
+                          : mic.StartsWith(root + "/Mat/MI_leaf_", StringComparison.Ordinal) ? texImports.Count == 3 : texImports.Count is 3 or 4) && parent >= 0;
             foreach (var t in texImports)
             {
                 string tp = mp.ImportName(-mp.ImportOuter(t) - 1);
@@ -1131,7 +1131,7 @@ internal static class Visuals
             if (ok) micOk++; else problems.Add($"{mic}: MIC layout");
         }
         C(problems.Count == 0 && micOk == mics.Count && texOk == textures.Count && (mics.Count > 0) == Options.Dr2Sections.Any(opt.Dr2On),
-          $"dr2: {mics.Count} MICs (standard: 3 or 4 texture imports; SpeedTree leaves: 3) and {textures.Count} textures resolve in the container; every mip inline at its data resource" +
+          $"dr2: {mics.Count} MICs (standard: 3 or 4 texture imports; SpeedTree leaves: 3; water: 0) and {textures.Count} textures resolve in the container; every mip inline at its data resource" +
           (problems.Count > 0 ? $"; {string.Join("; ", problems.Take(5))}" : ""));
         return failures;
     }

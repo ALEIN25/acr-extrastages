@@ -220,6 +220,7 @@ mic_normal_texture = "T_ConcreteWalkway_N"    #   Simple_Normal_Texture -> flat 
 orm = [255, 217, 0]             # occlusion 1, roughness 0.85, metal 0 (ACR _L textures: R occlusion, G roughness, B metal)
 # ground bake tiles: the bake (base colour) plus DR2's ground normal map tiled as M_Simple's detail normal, for close-up
 # relief the 6-8 cm/px bake cannot carry. Template: an M_Simple child with base colour, normal and detail normal switched on.
+water_mic_template = "/Game/Environments/GreeceS4Loutraki/TerrainMaterial/MI_LoutrakiOcean"   # M_Water child ([water])
 detail_mic_template = "/Game/Props/MonteCarloProps/MOnBolStoneWallB/MI_MonBolStoneWallC"
 detail_mic_base_texture = "T_MonBolStoneWallC_B"
 detail_mic_orm_texture = "T_MonBolStoneWallC_L"
@@ -295,8 +296,8 @@ mode = "scatter"              # off | scatter (grass-class collision terrain) | 
 density = 1.5             # candidate patch centres per projected m2; rejected outside the road-edge band
 max_distance_m = 4         # footprint at most this many metres outside the 12 m gate corridor; range 2..40
 road_margin_m = 0.3        # footprint kept this far off the drivable surface ([road] surfaces / codes found under the centreline)
-triangle_budget = 1200000    # per gameplay cell, 8 triangles per crossed pair, including sky-lit reverse faces
-textures = ["gc_billboard_d", "gc_clutter_d"]             # optional diffuse DDS stems; otherwise discover grass/fern/flower/weed/plant maps in render/*.materials.json
+triangle_budget = 600000     # per gameplay cell; two crossed, two-sided cards, without duplicate reverse faces
+textures = ["gc_billboard_d"] # discard flat clutter_01_mesh prototypes; they add overdraw with little visible grass coverage
 # Requires --visuals-dr2 1 --visuals-textured 1. No collision. Missing plant textures log a zero-triangle skip.
 # New stage-ir --render exports ground_cover.pssg materials for stage-textures. grass.grs remains undecoded.
 
@@ -332,7 +333,8 @@ finish_runout_m = 60
 [albedo_compensation]
 
 [water]
-# DR2's lakes and rivers (niwater.pssg -> stage-ir render/water.glb): flat planes drawn as one opaque, glossy section; no collision
+# DR2's lakes and rivers (niwater.pssg -> stage-ir render/water.glb): flat planes drawn as one section with ACR's water
+# material ([dr2_textures] water_mic_template, M_Water: scrolling ripples, screen-space reflections; opaque); no collision
 enabled = true
-colour = [30, 40, 38]          # sRGB base colour (dark peat-lake water)
-orm = [255, 18, 0]             # occlusion 1, roughness 0.07, metal 0: mirror-like, reflections from the engine
+colour = [0.018, 0.045, 0.05]  # linear WaterColor (Loutraki ocean 0.038, 0.131, 0.198): darker, greener lake water
+wave_size = 800                # M_Water WaveSize (ocean 3000, parent 1000): smaller ripples for a lake
