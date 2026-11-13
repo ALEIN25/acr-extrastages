@@ -108,8 +108,8 @@ internal static class CrowdEmission
         var layout = new Layout(usmap);
         int actor = Enumerable.Range(0, src.ExportCount).Single(e => src.ExportClass(e) == ActorClass);
         var templateData = src.GetExportData(actor);
-        var translations = new List<int>();
-        layout.Visit = (name, fields) => { if (name == "Transform") translations.Add(fields["Translation"]); };
+        var translations = new List<int>(); var rotations = new List<int>();
+        layout.Visit = (name, fields) => { if (name == "Transform") { translations.Add(fields["Translation"]); rotations.Add(fields["Rotation"]); } };
         int scan = 0; layout.Struct(templateData, ref scan, "CrowdSystemSpawnerBakedActor");
         layout.Visit = null;
         if (translations.Count == 0) throw new InvalidDataException("crowds: no baked Transform translations found");
@@ -183,12 +183,22 @@ internal static class CrowdEmission
                 {
                     int q = props["BakedSpawnData"]; var baked = layout.Struct(data, ref q, "CrowdSystemSpawnData");
                     people += Int(data, baked["Elements"]);
+                    // The crowd system does not turn baked people with the root component, so bake the spot yaw
+                    // into every element: rotate its offset and compose its rotation; the root stays at yaw 0.
+                    double angle = yaw * Math.PI / 180, c = Math.Cos(angle), sn = Math.Sin(angle);
                     foreach (int at in translations)
                     {
-                        double angle = yaw * Math.PI / 180, x = Read(at), y = Read(at + 8);
-                        var xy = new Vector2((float)(xyz[0] + x * Math.Cos(angle) - y * Math.Sin(angle)),
-                            (float)(xyz[1] + x * Math.Sin(angle) + y * Math.Cos(angle)));
-                        Double(data, at + 16, ground.At(xy)!.Value - xyz[2]);
+                        double x = Read(at), y = Read(at + 8), rx = x * c - y * sn, ry = x * sn + y * c;
+                        Double(data, at, rx); Double(data, at + 8, ry);
+                        Double(data, at + 16, ground.At(new Vector2((float)(xyz[0] + rx), (float)(xyz[1] + ry)))!.Value - xyz[2]);
+                    }
+                    double hz = Math.Sin(angle / 2), hw = Math.Cos(angle / 2);
+                    foreach (int at in rotations)
+                    {
+                        double qx = Read(at), qy = Read(at + 8), qz = Read(at + 16), qw = Read(at + 24);
+                        // (0,0,hz,hw) * q
+                        Double(data, at, hw * qx - hz * qy); Double(data, at + 8, hw * qy + hz * qx);
+                        Double(data, at + 16, hw * qz + hz * qw); Double(data, at + 24, hw * qw - hz * qz);
                     }
                     // Native actor trailer contains a label and actor instance GUID. Give every clone a fresh GUID.
                     if (data.Length - p < 32) throw new InvalidDataException("crowds: missing actor GUID trailer");
@@ -197,7 +207,7 @@ internal static class CrowdEmission
                 if (type == "SceneComponent")
                 {
                     int at = props["RelativeLocation"]; for (int k = 0; k < 3; k++) Double(data, at + k * 8, xyz[k]);
-                    at = props["RelativeRotation"]; Double(data, at, 0); Double(data, at + 8, yaw); Double(data, at + 16, 0);
+                    at = props["RelativeRotation"]; Double(data, at, 0); Double(data, at + 8, 0); Double(data, at + 16, 0);
                 }
                 var deps = src.ExportDeps(e);
                 IEnumerable<int> D(string k) => deps.Where(d => d.kind == k).Select(d => Ref(d.index));
@@ -228,11 +238,17 @@ internal static class CrowdEmission
         string diskPath = Path.GetFullPath(Path.Combine(root, cellPath + ".umap"));
         string packageKey = provider.Files.FirstOrDefault(kv => kv.Value.Path.Replace('\\', '/').EndsWith(cellPath.Replace('\\', '/') + ".umap", StringComparison.OrdinalIgnoreCase)).Key
             ?? throw new InvalidDataException($"crowds: cell {diskPath} not indexed; files: {string.Join(", ", provider.Files.Keys.Take(5))}");
-        var exports = provider.LoadPackage(packageKey).GetExports().ToList();
-        var actors = exports.Where(e => e.ExportType == ActorClass && e.Name.StartsWith(Prefix)).ToList();
+        // Load only the exports the check reads: GetExports() would deserialize the whole visuals mesh (millions of
+        // ProcMesh vertices as generic structs), which ran a 32 GB machine out of memory on the second cell.
+        var raw = new LegacyPackage(diskPath);
+        var lazy = provider.LoadPackage(packageKey).ExportsLazy;
+        if (lazy.Length != raw.ExportCount) throw new InvalidDataException("crowds: export map length differs between readers");
+        var actorIdx = Enumerable.Range(0, raw.ExportCount).Where(i => raw.ExportClass(i) == ActorClass && raw.ExportName(i).StartsWith(Prefix)).ToList();
+        var actors = actorIdx.Select(i => lazy[i].Value).ToList();
+        if (actors.Any(a => a.ExportType != ActorClass)) throw new InvalidDataException("crowds: export index mismatch between readers");
         var expected = report["emitted"]!.AsArray();
         if (actors.Count != expected.Count) throw new InvalidDataException("crowds: spawner count mismatch");
-        var level = exports.Single(e => e.ExportType == "Level");
+        var level = lazy[Enumerable.Range(0, raw.ExportCount).Single(i => raw.ExportClass(i) == "Level")].Value;
         // ULevel is in CUE4Parse's game-specific namespace; use its public native Actors field.
         var levelActors = (FPackageIndex[])(level.GetType().GetField("Actors")?.GetValue(level)
             ?? throw new InvalidDataException("crowds: reader has no Level.Actors field"));
@@ -240,10 +256,11 @@ internal static class CrowdEmission
         foreach (var spot in expected)
         {
             var actor = actors.Single(e => e.Name == spot!["actor"]!.GetValue<string>());
-            if (!levelActors.Any(a => a.ResolvedObject?.Load() == actor)) throw new InvalidDataException("crowds: actor missing from level actor list");
+            int self = actorIdx[actors.IndexOf(actor)];
+            if (!levelActors.Any(a => a.Index == self + 1)) throw new InvalidDataException("crowds: actor missing from level actor list");
             people += actor.GetOrDefault<FStructFallback>("BakedSpawnData")?.GetOrDefault<UScriptArray>("Elements")?.Properties.Count
                 ?? throw new InvalidDataException("crowds: missing baked spawn elements");
-            var components = exports.Where(e => e.Outer?.Name.ToString() == actor.Name).ToList();
+            var components = Enumerable.Range(0, raw.ExportCount).Where(i => raw.ExportOuter(i) == self + 1).Select(i => lazy[i].Value).ToList();
             if (components.Count != 4) throw new InvalidDataException("crowds: component count mismatch");
             foreach (var (prop, cls) in new[] { ("RootComponent", "SceneComponent"), ("SpawnerComponent", "CrowdSystemMassSpawnerComponent"), ("CrowdAnimation", "CrowdSystemAnimation"), ("CrowdRuntime", "CrowdSystemRuntime") })
             {
@@ -256,22 +273,24 @@ internal static class CrowdEmission
             if (ground.At(new((float)loc.X, (float)loc.Y)) is not { } rootHeight || Math.Abs(loc.Z - rootHeight) > 5)
                 throw new InvalidDataException("crowds: root is not on drawn ground");
             var rot = components.Single(e => e.ExportType == "SceneComponent").GetOrDefault<FRotator>("RelativeRotation");
-            if (Math.Abs(rot.Yaw - spot["yaw"]!.GetValue<double>()) > 0.01) throw new InvalidDataException("crowds: root yaw mismatch");
+            if (Math.Abs(rot.Yaw) > 0.01) throw new InvalidDataException("crowds: root yaw must be 0 (yaw is baked into the people)");
+            double spotYaw = spot["yaw"]!.GetValue<double>();
             var elements = actor.GetOrDefault<FStructFallback>("BakedSpawnData")!.GetOrDefault<UScriptArray>("Elements")!;
             foreach (var element in elements.Properties)
             {
                 var transform = element.GetValue<FStructFallback>()!.GetOrDefault<FTransform>("Transform");
-                double angle = rot.Yaw * Math.PI / 180;
-                var foot = transform.Translation;
-                var xy = new Vector2((float)(loc.X + foot.X * Math.Cos(angle) - foot.Y * Math.Sin(angle)),
-                    (float)(loc.Y + foot.X * Math.Sin(angle) + foot.Y * Math.Cos(angle)));
+                var foot = transform.Translation; var q = transform.Rotation;
+                double personYaw = Math.Atan2(2 * (q.W * q.Z + q.X * q.Y), 1 - 2 * (q.Y * q.Y + q.Z * q.Z)) * 180 / Math.PI;
+                double turn = ((personYaw - spotYaw) % 360 + 540) % 360 - 180;
+                if (Math.Abs(turn) > 45) throw new InvalidDataException($"crowds: baked person yaw {personYaw:0.#} is {turn:0.#} degrees off the spot yaw {spotYaw:0.#}");
+                var xy = new Vector2((float)(loc.X + foot.X), (float)(loc.Y + foot.Y));
                 if (ground.At(xy) is not { } h || Math.Abs(loc.Z + foot.Z - h) > 5)
                     throw new InvalidDataException("crowds: baked person's world Z differs from drawn ground by > 5 cm");
             }
         }
         if (people != report["people_emitted"]!.GetValue<int>()) throw new InvalidDataException("crowds: baked people count mismatch");
         w.WriteLine($"crowds: emitted {actors.Count} spawners ({report["people_emitted"]} people) in {cellPath}");
-        w.WriteLine($"crowds: drawn-ground contact: {people} people within 5 cm (rotated world XY)");
+        w.WriteLine($"crowds: drawn-ground contact: {people} people within 5 cm, each facing within 45 degrees of its spot yaw");
         return 0;
     }
 

@@ -257,6 +257,9 @@ internal static class StageBuild
         File.WriteAllText(reportPath, report.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
         Console.WriteLine($"report -> {reportPath}");
 
+        // The build's cells, meshes and textures are dead here: return their memory before the checks re-read the cells.
+        System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
+        GC.Collect(2, GCCollectionMode.Forced, blocking: true, compacting: true);
         int failures = Check(outRoot, ir, pl, hostColliders, Console.Out, report, o.Usmap);
         return failures == 0 ? 0 : 5;
     }
@@ -1058,10 +1061,15 @@ internal static class StageBuild
     {
         Advisory.Load(report["options"]?["visuals"]?.GetValue<string>());
         int failures = 0;
+        // One read of each gameplay cell for every check (Visuals.Drawn caches its parsed sections per instance).
+        LegacyPackage? fwdCell = null, revCell = null;
+        LegacyPackage CellPkg(string cellPath) => cellPath == HostPaths.Cell ? fwdCell ??= new LegacyPackage(HostPaths.Resolve(root, HostPaths.Cell))
+            : cellPath == HostPaths.Reverse.Cell ? revCell ??= new LegacyPackage(HostPaths.Resolve(root, HostPaths.Reverse.Cell))
+            : new LegacyPackage(HostPaths.Resolve(root, cellPath));
         foreach (var (key, cellPath) in new[] { ("cell", HostPaths.Cell), ("reverse_cell", HostPaths.Reverse.Cell) })
             if (report[key]?["crowds"] is { } crowds)
                 failures += CrowdEmission.Check(root, cellPath, usmap, crowds, w,
-                    Visuals.GroundSurface(new LegacyPackage(HostPaths.Resolve(root, cellPath)), report[key]?["visuals"]));
+                    Visuals.GroundSurface(CellPkg(cellPath), report[key]?["visuals"]));
         void C(bool ok, string what) { w.WriteLine($"{Advisory.Verdict(ok, what, out var bad)} {what}"); if (bad) failures++; }
 
         bool additive = report["options"]?["additive"]?.GetValue<bool>() == true;
@@ -1091,15 +1099,16 @@ internal static class StageBuild
                 vo["visuals_ground_lod"]?.GetValue<bool>() ?? false, vo["visuals_ground_bake"]?.GetValue<string>());
             RoadProbe? probe = vo["objects"]?.GetValue<string>() is { } objCfg
                 ? NewProbe(ir, pl, objCfg) : null;
-            failures += Visuals.Check(new LegacyPackage(HostPaths.Resolve(root, HostPaths.Cell)), ir, pl, Toml.Load(visualsCfg), opt, w,
+            failures += Visuals.Check(CellPkg(HostPaths.Cell), ir, pl, Toml.Load(visualsCfg), opt, w,
                                       report["cell"]?["visuals"], probe, root, report["options"]?["package_root"]?.GetValue<string>());
             // instanced trees: both gameplay cells carry them (each variant streams only its own cell); the mesh packages are shared, checked once
             if (report["cell"]?["visuals"]?["instancing"] is { } instReport)
-                failures += Instancing.Check(new LegacyPackage(HostPaths.Resolve(root, HostPaths.Cell)), root, ir, pl, Toml.Load(visualsCfg), instReport, report["cell"]!["visuals"]!, InPhysicsBounds, w, "instancing (forward cell):", meshes: true);
+                failures += Instancing.Check(CellPkg(HostPaths.Cell), root, ir, pl, Toml.Load(visualsCfg), instReport, report["cell"]!["visuals"]!, InPhysicsBounds, w, "instancing (forward cell):", meshes: true);
             if (report["reverse_cell"]?["visuals"]?["instancing"] is { } revInstReport)
-                failures += Instancing.Check(new LegacyPackage(HostPaths.Resolve(root, HostPaths.Reverse.Cell)), root, ir, pl, Toml.Load(visualsCfg), revInstReport, report["reverse_cell"]!["visuals"]!, InPhysicsBounds, w, "instancing (reverse cell):", meshes: false);
+                failures += Instancing.Check(CellPkg(HostPaths.Reverse.Cell), root, ir, pl, Toml.Load(visualsCfg), revInstReport, report["reverse_cell"]!["visuals"]!, InPhysicsBounds, w, "instancing (reverse cell):", meshes: false);
         }
 
+        revCell = null;   // the reverse cell (and its cached sections) is not read again
         if (report["options"]?["scenery"]?.GetValue<string>() is { } sceneryCfg)
             failures += Scenery.Check(root, Toml.Load(sceneryCfg), new Options().Usmap, w, report["scenery"]);
         if (!additive && report["options"]?["names"]?.GetValue<string>() is { } namesCfg)
@@ -1136,7 +1145,7 @@ internal static class StageBuild
         // physics against visuals: no collider may stand above what is drawn (InvisibleCheck)
         if (report["options"]?["visuals"]?.GetValue<string>() is { } invCfg && report["baked"]?["simple_added"] is { } invAdded)
         {
-            var gcell = new LegacyPackage(HostPaths.Resolve(root, HostPaths.Cell));
+            var gcell = CellPkg(HostPaths.Cell);
             var (drawn, secNames) = Visuals.Drawn(gcell, report["cell"]?["visuals"]);
             var shapes = InvisibleCheck.SimpleShapes(data, simple, invAdded.GetValue<int>());
             Action<InvisibleCheck.Drawn, int>? instDraw = null; Func<InvisibleCheck.Shape, double?>? instBase = null;
@@ -1191,7 +1200,7 @@ internal static class StageBuild
         }
         C(missLine == 0, $"ground raycast every <=1 m along the centreline: {samples} samples, {missLine} without ground (max |dy| to the chord {maxLine * 100:0.#} cm)");
 
-        var cell = new LegacyPackage(HostPaths.Resolve(root, HostPaths.Cell));
+        var cell = CellPkg(HostPaths.Cell);
         var cs = Splines.SplitComponent(cell.GetExportData(cell.FindExport("CenterSpline", "DMSplineComponent"))).Curves;
         double len = cs.Reparam.Points[^1].InVal / 100;
         double polyLen = 0;

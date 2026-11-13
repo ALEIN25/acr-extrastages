@@ -293,7 +293,8 @@ max_slope_degrees = 25 # reject steep drawn ground across the rotated group foot
 [ground_cover]
 mode = "scatter"              # off | scatter (grass-class collision terrain) | ornaments (plant anchors from IR)
 density = 1.5             # candidate patch centres per projected m2; rejected outside the road-edge band
-max_distance_m = 6         # entire footprint 2..this many metres outside the authored road edge; range 2..40
+max_distance_m = 4         # footprint at most this many metres outside the 12 m gate corridor; range 2..40
+road_margin_m = 0.3        # footprint kept this far off the drivable surface ([road] surfaces / codes found under the centreline)
 triangle_budget = 1200000    # per gameplay cell, 8 triangles per crossed pair, including sky-lit reverse faces
 textures = ["gc_billboard_d", "gc_clutter_d"]             # optional diffuse DDS stems; otherwise discover grass/fern/flower/weed/plant maps in render/*.materials.json
 # Requires --visuals-dr2 1 --visuals-textured 1. No collision. Missing plant textures log a zero-triangle skip.
@@ -329,3 +330,9 @@ finish_runout_m = 60
 # Exact texture names as logged by Dr2Materials; linear RGB gain, 1 = unchanged.
 # Opt-in experiment: set a selected baked tile to 1.5, then compare shaded banks.
 [albedo_compensation]
+
+[water]
+# DR2's lakes and rivers (niwater.pssg -> stage-ir render/water.glb): flat planes drawn as one opaque, glossy section; no collision
+enabled = true
+colour = [30, 40, 38]          # sRGB base colour (dark peat-lake water)
+orm = [255, 18, 0]             # occlusion 1, roughness 0.07, metal 0: mirror-like, reflections from the engine

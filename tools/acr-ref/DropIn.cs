@@ -222,6 +222,15 @@ internal sealed class Dr2Materials
         return Mic("cls_neutral", Texture("neutral_grey", Dds.Fmt.BC1, false, 4, 4, [Dds.EncodeBc1(px, 4, 4)]));
     }
 
+    /// Lakes and rivers: an opaque, glossy flat-colour MIC ([water] colour and orm); the engine's reflections do the rest.
+    public string WaterMic(IReadOnlyList<byte> rgb, IReadOnlyList<byte> orm)
+    {
+        byte[] Solid(IReadOnlyList<byte> c) { var px = new byte[16 * 4]; for (int i = 0; i < 16; i++) { px[i * 4] = c[0]; px[i * 4 + 1] = c[1]; px[i * 4 + 2] = c[2]; px[i * 4 + 3] = 255; } return px; }
+        var colour = Texture("water_colour", Dds.Fmt.BC1, false, 4, 4, [Dds.EncodeBc1(Solid(rgb), 4, 4)]);
+        var ormTex = Texture("water_orm", Dds.Fmt.BC1, true, 4, 4, [Dds.EncodeBc1(Solid(orm), 4, 4)]);
+        return MicFrom("mic_template", "water", colour, [("mic_base_texture", colour), ("mic_orm_texture", ormTex), ("mic_normal_texture", Normal())]);
+    }
+
     /// The DR2 trunk diffuse (<template>_tr_d, foliage_trunk.fx) of a material, null if it is not a trunk material or the
     /// texture is not usable. ObjectDiffuse skips foliage shaders, so trunks have their own lookup.
     public string? TrunkDiffuse(JsonNode material)

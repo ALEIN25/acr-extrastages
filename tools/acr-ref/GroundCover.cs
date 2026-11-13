@@ -12,7 +12,8 @@ internal static class GroundCover
     static string TexName(string reference) => Path.GetFileNameWithoutExtension(reference[(reference.LastIndexOf('#') + 1)..]);
 
     public static (Dictionary<string, ProcMesh.Section> sections, JsonObject report) Build(
-        StageBuild.Ir ir, StageBuild.Placement pl, Toml cfg, Func<V3, bool> inBounds, Dr2Materials? dr2, Visuals.TopSurface ground)
+        StageBuild.Ir ir, StageBuild.Placement pl, Toml cfg, Func<V3, bool> inBounds, Dr2Materials? dr2, Visuals.TopSurface ground,
+        Func<double, double, bool>? onRoad = null)
     {
         var sections = new Dictionary<string, ProcMesh.Section>();
         var settings = cfg["ground_cover"];
@@ -21,7 +22,10 @@ internal static class GroundCover
         var report = new JsonObject { ["mode"] = mode, ["triangles"] = 0, ["instances"] = 0, ["prototypes_used"] = 0 };
         if (mode == "off") { Console.WriteLine("ground cover: off, 0 triangles"); return (sections, report); }
         double Num(string key, double fallback) => settings.TryGetValue(key, out var v) && v is double n ? n : fallback;
-        double density = Num("density", 1.5), maxDistance = Num("max_distance_m", 6);
+        double density = Num("density", 1.5), maxDistance = Num("max_distance_m", 6), roadMargin = Num("road_margin_m", 0.3) * 100;
+        // Plants stand on DR2's verge from the drivable surface outwards; the 12 m gate corridor is wider than the gravel.
+        // Without a road-surface lookup (self-tests) the old rule applies: whole footprint 2 m outside the corridor.
+        double inner = onRoad is null ? 200 : -1e9;
         double budgetValue = Num("triangle_budget", 1200000);
         if (!double.IsFinite(density) || density < 0 || density > 100 || !double.IsFinite(maxDistance) || maxDistance < 2 || maxDistance > 40
             || !double.IsFinite(budgetValue) || budgetValue < 0 || budgetValue > 2000000 || budgetValue != Math.Floor(budgetValue))
@@ -49,7 +53,8 @@ internal static class GroundCover
         int minTriangles = prototypes.Min(p => p.Triangles);
         var used = new HashSet<int>();
         var alpha = CheckAlpha(ir.Dir, prototypes);
-        int transparentPlaced = 0, flippedTransparentPlaced = 0, missingGround = 0, patches = 0;
+        int transparentPlaced = 0, flippedTransparentPlaced = 0, missingGround = 0, patches = 0, onRoadRejects = 0;
+        var chunks = new Dictionary<string, int>();
         void Place(Vector3 p)
         {
             var eligible = prototypes.Where(p => p.Triangles <= budget - triangleCount).ToArray();
@@ -62,15 +67,43 @@ internal static class GroundCover
             float radius = prototype.Radius * scale;
             double clearance = road.Query(p.X, p.Y).clearance;
             // Bound the whole transformed prototype, including the second billboard and hairpins.
-            if (clearance - radius < 200 || clearance + radius > maxDistance * 100)
+            if (clearance - radius < inner || clearance + radius > maxDistance * 100)
             { rejected++; return; }
+            // only footprints near the gate corridor need the road-surface test; 3 m slack because this corridor runs through the
+            // gate crossings (~15 m apart) while the road check follows the dense centreline, which differs by over a metre on bends
+            if (onRoad is not null && clearance - radius - roadMargin < 300)
+            {
+                float reachRoad = radius + (float)roadMargin;
+                bool touches = onRoad(p.X, p.Y);
+                // filled disc, rings every <= 10 cm and points <= 10 cm apart: road-surface slivers on the verge and small islands too
+                int rings = Math.Max(1, (int)MathF.Ceiling(reachRoad / 10));
+                for (int ring = 1; ring <= rings && !touches; ring++)
+                {
+                    float rr = reachRoad * ring / rings; int n = Math.Max(6, (int)MathF.Ceiling(MathF.Tau * rr / 10));
+                    for (int k = 0; k < n && !touches; k++) touches = onRoad(p.X + rr * MathF.Cos(k * MathF.Tau / n), p.Y + rr * MathF.Sin(k * MathF.Tau / n));
+                }
+                if (touches) { onRoadRejects++; rejected++; return; }
+            }
             if (ground.At(new(p.X, p.Y)) is not { } height) { missingGround++; rejected++; return; }
             p.Z = (float)height + 2;
             var yaw = Matrix4x4.CreateRotationZ((float)(random.NextDouble() * Math.Tau));
-            foreach (var part in prototype.Parts)
+            // The drawn triangles themselves, sampled every <= 10 cm in plan (the road check samples every 25 cm): the footprint
+            // disc above keeps the visual margin, this keeps every emitted triangle off the road surface exactly.
+            var placed = prototype.Parts.Select(part => { var t = new ProcMesh.Section(); Emit(t, part, p, scale, yaw); return t; }).ToArray();
+            if (onRoad is not null && placed.Any(t => TouchesRoad(t, onRoad))) { onRoadRejects++; rejected++; return; }
+            for (int pi = 0; pi < prototype.Parts.Length; pi++)
             {
-                if (!sections.TryGetValue(part.Texture, out var section)) sections[part.Texture] = section = new ProcMesh.Section();
-                Emit(section, part, p, scale, yaw);
+                var part = prototype.Parts[pi];
+                // At most MaxSectionVertices per section: the billboard section alone reached 1.14 M vertices.
+                int chunk = chunks.GetValueOrDefault(part.Texture);
+                string key = chunk == 0 ? part.Texture : part.Texture + "!" + chunk;
+                if (!sections.TryGetValue(key, out var section)) sections[key] = section = new ProcMesh.Section();
+                if (section.Pos.Count + part.Positions.Length * 4 > MaxSectionVertices)
+                {
+                    chunks[part.Texture] = ++chunk; key = part.Texture + "!" + chunk;
+                    sections[key] = section = new ProcMesh.Section();
+                }
+                Append(section, placed[pi]);
             }
             triangleCount += prototype.Triangles; used.Add(prototype.Id); kept++;
             if (alpha[prototype.Id].transparent) transparentPlaced++;
@@ -96,7 +129,7 @@ internal static class GroundCover
                     var centre = (a + b + c) / 3;
                     float reach = Math.Max(Vector3.Distance(centre, a), Math.Max(Vector3.Distance(centre, b), Vector3.Distance(centre, c)));
                     double clearance = road.Query(centre.X, centre.Y).clearance;
-                    if (clearance + reach < 200 || clearance - reach > maxDistance * 100) continue;
+                    if (clearance + reach < inner || clearance - reach > maxDistance * 100) continue;
                     area += Math.Abs(cross.Z) / 20000.0; // projected square metres
                     triangles.Add((a, b, c)); cumulative.Add(area);
                 }
@@ -138,13 +171,49 @@ internal static class GroundCover
             report["plant_ornaments"] = instances.Count;
         }
         report["instances"] = kept; report["triangles"] = triangleCount; report["rejected"] = rejected; report["prototypes_used"] = used.Count;
-        report["patches"] = patches; report["missing_drawn_ground"] = missingGround;
+        report["patches"] = patches; report["missing_drawn_ground"] = missingGround; report["road_surface_rejects"] = onRoadRejects;
+        report["sections"] = sections.Count; report["max_section_vertices"] = sections.Count == 0 ? 0 : sections.Values.Max(s => s.Pos.Count);
         report["uv_centre_transparent_instances"] = transparentPlaced;
         report["uv_centre_flipped_v_transparent_instances"] = flippedTransparentPlaced;
         Console.WriteLine($"ground cover: drawn-ground +2 cm, {patches} candidate patches (4..12 plants, radius 0.4..1.5 m), {missingGround} missing-ground rejects");
         Console.WriteLine($"ground cover: UV centre alpha: {transparentPlaced}/{kept} placed prototypes on transparent texels; flipped V would be {flippedTransparentPlaced}/{kept}; leaf MIC = tree-card LeafMic");
+        Console.WriteLine($"ground cover: {(onRoad is null ? "footprints 2 m outside the gate corridor" : $"footprints {roadMargin / 100:0.##} m clear of the road surface")}, {onRoadRejects} road-surface rejects; {sections.Count} sections, at most {(sections.Count == 0 ? 0 : sections.Values.Max(s => s.Pos.Count))} vertices each");
         Console.WriteLine($"ground cover: {mode}, {kept} plants, {triangleCount} triangles (budget {budget}), {textures.Length} textures, {used.Count} prototypes used, {rejected} rejected");
         return (sections, report);
+    }
+
+    const int MaxSectionVertices = 400000;
+
+    /// Any sample of the drawn triangles on the road surface: the road check's own sample points (barycentric grid every
+    /// <= 25 cm in plan, in doubles exactly as RoadProbe.TriangleDepth computes them, so a road-surface sliver a few cm wide in
+    /// the verge cannot fall between the two) plus a finer 10 cm grid.
+    static bool TouchesRoad(ProcMesh.Section s, Func<double, double, bool> onRoad)
+    {
+        for (int t = 0; t + 2 < s.Idx.Count; t += 3)
+        {
+            var a = V(s.Pos[(int)s.Idx[t]]); var b = V(s.Pos[(int)s.Idx[t + 1]]); var c = V(s.Pos[(int)s.Idx[t + 2]]);
+            foreach (double step in new[] { 25.0, 10.0 })
+            {
+                int n = Math.Max(1, (int)Math.Ceiling(Math.Max(Plan(b - a), Math.Max(Plan(c - b), Plan(a - c))) / step));
+                for (int i = 0; i <= n; i++)
+                    for (int j = 0; i + j <= n; j++)
+                    {
+                        double u = (double)i / n, v = (double)j / n;
+                        var q = a * (1 - u - v) + b * u + c * v;
+                        if (onRoad(q.X, q.Y)) return true;
+                    }
+            }
+        }
+        return false;
+        static V3 V(Vector3 p) => new(p.X, p.Y, p.Z);
+        static double Plan(V3 d) => Math.Sqrt(d.X * d.X + d.Y * d.Y);
+    }
+
+    static void Append(ProcMesh.Section dst, ProcMesh.Section src)
+    {
+        uint start = (uint)dst.Pos.Count;
+        dst.Pos.AddRange(src.Pos); dst.Nrm.AddRange(src.Nrm); dst.Uv.AddRange(src.Uv);
+        foreach (var i in src.Idx) dst.Idx.Add(start + i);
     }
 
     internal sealed record Part(string Texture, bool Billboard, Vector3[] Positions, Vector3[] Normals, Vector2[] Uv, uint[] Indices);

@@ -287,6 +287,17 @@ internal static partial class StageIr
             Console.WriteLine($"ground cover source: {coverSource}, {coverResult.Materials.Count} materials, {coverResult.Triangles} prototype triangles (grass.grs not decoded)");
         }
 
+        // Lakes and rivers (niwater.pssg, water_v3_river.fx): flat planes for the whole location, exported whole.
+        var waterSource = $"{locDir}/niwater.pssg";
+        if (options.Render && install.Exists(waterSource))
+        {
+            var water = PssgCommands.Open(await install.FetchAsync(waterSource));
+            var waterGlb = Path.Combine(outDir, "render", "water.glb");
+            var waterResult = PssgMeshExport.Export(water, waterGlb, null);
+            File.WriteAllText(Path.ChangeExtension(waterGlb, ".materials.json"), JsonSerializer.Serialize(waterResult.Materials, Json.Options));
+            Console.WriteLine($"water source: {waterSource}, {waterResult.Triangles} triangles");
+        }
+
         object? groundBake = null;
         if (options.Bake is not null)
         {

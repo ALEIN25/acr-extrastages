@@ -820,14 +820,45 @@ internal static class Visuals
             ((JsonObject)r["instancing"]!)["keep_placeholders"] = keepMics.Count;
             Console.WriteLine($"visuals: instancing: {keepMics.Count} placeholder sections keep the instanced meshes' materials imported");
         }
-        var (coverSections, coverReport) = GroundCover.Build(ir, pl, cfg, inPhysicsBounds, dr2,
-            GroundSurface(sections, sectionNames.Select(n => n!.GetValue<string>()).ToList()));
-        foreach (var (texture, section) in coverSections)
+        var waterGlb = Path.Combine(ir.Dir, "render", "water.glb");
+        if (dr2 is not null && cfg["water"].TryGetValue("enabled", out var waterOn) && waterOn is true && File.Exists(waterGlb))
         {
+            var water = new ProcMesh.Section();
+            foreach (var prim in new Glb(waterGlb).Primitives())
+            {
+                int nv = prim.Positions.Length / 3, first = water.Pos.Count;
+                for (int v = 0; v < nv; v++)
+                {
+                    var p = pl.ToPhysics(prim.Positions[v * 3], prim.Positions[v * 3 + 1], prim.Positions[v * 3 + 2]);
+                    var q = new Vector3((float)(p.X * 100), (float)(p.Z * 100), (float)(p.Y * 100));
+                    water.Pos.Add(q); water.Nrm.Add(Vector3.Zero); water.Uv.Add(new Vector2(q.X / 400, q.Y / 400));
+                }
+                for (int t = 0; t + 2 < prim.Indices.Length; t += 3)
+                    AddTri(water, first + (int)prim.Indices[t], first + (int)prim.Indices[t + 1], first + (int)prim.Indices[t + 2]);
+            }
+            for (int i = 0; i < water.Nrm.Count; i++) water.Nrm[i] = water.Nrm[i] == Vector3.Zero ? Vector3.UnitZ : Vector3.Normalize(water.Nrm[i]);
+            if (water.Idx.Count > 0)
+            {
+                int at = Enumerable.Range(0, sectionNames.Count).FirstOrDefault(i => sectionNames[i]!.GetValue<string>() == "vista", sectionNames.Count);
+                sections.Insert(at, water);
+                mats.Insert(at, MatPath(dr2.WaterMic(cfg.Arr("water", "colour").Select(x => Convert.ToByte(x)).ToArray(),
+                    cfg.Arr("water", "orm").Select(x => Convert.ToByte(x)).ToArray())));
+                sectionNames.Insert(at, "water");
+            }
+            r["water"] = new JsonObject { ["triangles"] = water.Idx.Count / 3, ["bounds"] = water.Pos.Count == 0 ? null : ProcMesh.Bounds(water.Pos).ToString() };
+            Console.WriteLine($"water: {water.Idx.Count / 3} triangles from render/water.glb (niwater.pssg)");
+        }
+        var coverSurfaces = new SurfaceGrid(Path.Combine(ir.Dir, "collision.glb"), pl);
+        var (coverSections, coverReport) = GroundCover.Build(ir, pl, cfg, inPhysicsBounds, dr2,
+            GroundSurface(sections, sectionNames.Select(n => n!.GetValue<string>()).ToList()),
+            (x, y) => coverSurfaces.At(x / 100, y / 100) is { } code && roadCodes.Contains(code));
+        foreach (var (key, section) in coverSections)
+        {
+            string texture = key.Split('!')[0];
             int at = Enumerable.Range(0, sectionNames.Count).FirstOrDefault(i => sectionNames[i]!.GetValue<string>() == "vista", sectionNames.Count);
             sections.Insert(at, section);
             mats.Insert(at, MatPath(dr2!.LeafMic("ground_cover_" + texture, dr2.Texture(texture))));
-            sectionNames.Insert(at, "ground_cover:" + texture);
+            sectionNames.Insert(at, "ground_cover:" + key);
         }
         r["ground_cover"] = coverReport;
         r["sections"] = sectionNames;
@@ -991,7 +1022,19 @@ internal static class Visuals
         return GroundSurface(sections, names);
     }
 
+    // Parsed sections per package instance: the checks read the same cell several times (ground surface, road corridor,
+    // InvisibleCheck); the sections are read-only there.
+    static readonly System.Runtime.CompilerServices.ConditionalWeakTable<LegacyPackage, Tuple<JsonNode?, List<ProcMesh.Section>, List<string>?>> _drawn = new();
+
     internal static (List<ProcMesh.Section> Sections, List<string>? Names) Drawn(LegacyPackage cell, JsonNode? report)
+    {
+        if (_drawn.TryGetValue(cell, out var hit) && ReferenceEquals(hit.Item1, report)) return (hit.Item2, hit.Item3);
+        var result = DrawnUncached(cell, report);
+        _drawn.AddOrUpdate(cell, Tuple.Create(report, result.Sections, result.Names));
+        return result;
+    }
+
+    static (List<ProcMesh.Section> Sections, List<string>? Names) DrawnUncached(LegacyPackage cell, JsonNode? report)
     {
         var sections = new List<ProcMesh.Section>();
         var names = new List<string>();
@@ -1182,7 +1225,8 @@ internal static class Visuals
                     C(true, $"visuals road corridor: {name} {secs[i].Idx.Count / 3} triangles of an overhead structure on its own colliders, not held to the limit");
                     continue;
                 }
-                bool soft = name == "objects:soft" || name.StartsWith("objects:" + VisualObjects.CardPrefix) || name.StartsWith("ground_cover:"), isPosts = name == "posts";
+                bool isCover = name.StartsWith("ground_cover:");
+                bool soft = name == "objects:soft" || name.StartsWith("objects:" + VisualObjects.CardPrefix) || isCover, isPosts = name == "posts";
                 double limit = isPosts ? cfg.Num("markers", "post_width_m") * 75 : soft ? 0 : probe.MaxPen + tol;
                 var s = secs[i];
                 double deepest = 0, deepestHigh = 0; int over = 0, high = 0, unexplained = 0;
@@ -1202,7 +1246,8 @@ internal static class Visuals
                     Splines.V3 P(int k) { var v = s.Pos[(int)s.Idx[t + k]]; return new(v.X, v.Y, v.Z); }
                     if (soft)
                     {
-                        double d = probe.TriangleDepth(P(0), P(1), P(2), 50, -1e9, 1e9, surfaceOnly: false);
+                        // ground cover stands on the verge inside the 12 m gate corridor: held off the road surface itself instead
+                        double d = probe.TriangleDepth(P(0), P(1), P(2), isCover ? 25 : 50, -1e9, 1e9, surfaceOnly: isCover);
                         if (d > deepest) { deepest = d; deepAt = (P(0) + P(1) + P(2)) * (1.0 / 3); }
                         if (d > 0.5) over++;
                         continue;
@@ -1218,7 +1263,7 @@ internal static class Visuals
                     if (!colliders.Any(cl => Math.Sqrt((g.X - cl.at.X) * (g.X - cl.at.X) + (g.Y - cl.at.Y) * (g.Y - cl.at.Y)) <= cl.reach + 1)) unexplained++;
                 }
                 if (soft)
-                    C(over == 0, $"visuals road corridor: crowns {s.Idx.Count / 3} triangles, deepest {deepest / 100:0.00} m inside the corridor in plan, {over} inside" +
+                    C(over == 0, $"visuals road corridor: {(isCover ? "ground cover" : "crowns")} {s.Idx.Count / 3} triangles, deepest {deepest / 100:0.00} m inside the corridor {(isCover ? "over the road surface" : "in plan")}, {over} inside" +
                                  (over > 0 ? $" ({name} at UE {deepAt.X / 100:0.0},{deepAt.Y / 100:0.0},{deepAt.Z / 100:0.0} m)" : ""));
                 else
                     C(over == 0 && unexplained == 0,

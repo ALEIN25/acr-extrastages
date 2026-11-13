@@ -289,7 +289,8 @@ internal static class InvisibleCheck
             }
             for (int i = 0; i < drawn.Count; i++)
             {
-                if (names is not null && i < names.Count && (names[i] == "dummy" || names[i].StartsWith("instancing:keep:"))) continue;
+                // ground cover is render-only grass: a plant drawn over a collider does not show the solid obstacle, so it never counts as cover
+                if (names is not null && i < names.Count && (names[i] == "dummy" || names[i].StartsWith("instancing:keep:") || names[i].StartsWith("ground_cover:"))) continue;
                 var s = drawn[i];
                 int si = i;
                 for (int t = 0; t + 2 < s.Idx.Count; t += 3) Raster(G, At(s, t, 0), At(s, t, 1), At(s, t, 2), (id, z) => Add(id, z, si));
