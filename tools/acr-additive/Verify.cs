@@ -103,11 +103,18 @@ internal static class Verify
             C(tr.ContainsKey(s.Id) && lv.ContainsKey(s.Id) && s.Variants.All(v => vr.ContainsKey(v.Row)), $"{s.Id}: level, track and {s.Variants.Count} variant rows present");
             foreach (var v in s.Variants)
             {
+                if (!vr.ContainsKey(v.Row)) continue;   // reported missing above
                 var j = Newtonsoft.Json.Linq.JObject.Parse(vr[v.Row]);
-                var name = (string?)j["Name"]?["CultureInvariantString"] ?? (string?)j["Name"]?["SourceString"] ?? j["Name"]?.ToString(Formatting.None);
+                var name =(string?)j["Name"]?["CultureInvariantString"] ?? (string?)j["Name"]?["SourceString"] ?? j["Name"]?.ToString(Formatting.None);
                 C(name == v.Name && (v.Length is null || Math.Abs((float)j["Length"]! - v.Length.Value) < 1e-4)
                   && (string)j["Track"]!["Row"]! == s.Id,
                   $"  {v.Row}: Name '{name}', Length {(float)j["Length"]!}, Track {(string)j["Track"]!["Row"]!}");
+                // the DataLayers override (a reverse variant streams only its gameplay layer): decodes to exactly the listed rows
+                if (v.DataLayers is { } dl)
+                {
+                    var got = (j["DataLayers"]?["Common"]?["Value"] as Newtonsoft.Json.Linq.JArray ?? []).Select(x => $"{x["Table"]}/{x["Row"]}").ToList();
+                    C(got.SequenceEqual(dl.Select(x => $"DataLayers/{x}")), $"  {v.Row}: DataLayers [{string.Join(", ", got)}]");
+                }
             }
             var levelPath = (string)Newtonsoft.Json.Linq.JObject.Parse(lv[s.Id])["AssetPathName"]!;
             var subPath = (string)Newtonsoft.Json.Linq.JObject.Parse(lv[s.Id])["SubPathString"]!;
@@ -172,7 +179,7 @@ internal static class Verify
               $"  DT_Tracks[{s.Id}]: Map -> {Ref(tr[s.Id], "Map")}, TrackImage -> {Ref(tr[s.Id], "TrackImage")}, LobbyTrackImage -> {Ref(tr[s.Id], "LobbyTrackImage")}");
             var vRows = Rows(van, BaseTables[2]);
             foreach (var v in s.Variants)
-                C(Ref(vr[v.Row], "MapSmall") == Menu.TextureRow(s.Id, "MapSmall") && Ref(vr[v.Row], "ElevationMap") == Menu.TextureRow(s.Id, "Elevation")
+                C(Ref(vr[v.Row], "MapSmall") == Menu.TextureRow(s.Id, Menu.VariantKind(s, v, "MapSmall")) && Ref(vr[v.Row], "ElevationMap") == Menu.TextureRow(s.Id, Menu.VariantKind(s, v, "Elevation"))
                   && Ref(vr[v.Row], "VariantImage") == Want("Banner", Ref(vRows[v.Template], "VariantImage"))
                   && Ref(vr[v.Row], "LobbyVariantImage") == Want("Lobby", Ref(vRows[v.Template], "LobbyVariantImage")),
                   $"  {v.Row}: MapSmall -> {Ref(vr[v.Row], "MapSmall")}, ElevationMap -> {Ref(vr[v.Row], "ElevationMap")}, " +

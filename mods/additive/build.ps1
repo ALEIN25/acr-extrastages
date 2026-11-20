@@ -112,7 +112,7 @@ function Build-PortedStage($s, [string]$legacy, [string]$vanillaGame, [string]$a
         '--respawn', 'relay',
         '--scenery', (Join-Path $root 'config\scenery.toml'), '--scenery-actor-hidden', '1',
         '--visuals', (Join-Path $root 'config\visuals.toml'), '--visuals-host', 'start', '--visuals-retarget', '1',
-        '--visuals-vegetation', 'none', '--visuals-vista', '1', '--visuals-textured', '1',
+        '--visuals-vegetation', 'cards', '--visuals-vista', '1', '--visuals-textured', '1',
         '--visuals-dr2', '1', '--visuals-canopies', 'apex', '--visuals-terrain-uv', 'box',
         '--visuals-ground', 'render', '--visuals-ground-lod', '1'
     )
@@ -123,6 +123,8 @@ function Build-PortedStage($s, [string]$legacy, [string]$vanillaGame, [string]$a
     $sbArgs += @('--bounds', '1')
     $groundOffset = if ($null -ne $s.GroundOffset) { [double]$s.GroundOffset } else { 0 }
     if ($groundOffset -ne 0) { $sbArgs += @('--ground-offset', $groundOffset.ToString([Globalization.CultureInfo]::InvariantCulture)) }
+    if ($s.Road -eq 'acr') { $sbArgs += @('--visuals-dr2-revert', 'road') }
+    elseif ($s.Road -ne 'dr2') { $sbArgs += @('--visuals-road-bake', '1') }
     $bake = Join-Path $ir 'render\ground_bake\manifest.json'
     if (Test-Path $bake) { $sbArgs += @('--visuals-ground-bake', $bake) }
     Run $acrRef @sbArgs
@@ -139,8 +141,8 @@ function Build-PortedStage($s, [string]$legacy, [string]$vanillaGame, [string]$a
     # the overlay (full Hafren tree + stage-build output) is only relocate's input: drop it now, before the heavy retoc step
     if (-not $KeepTemp) { Remove-Item -Recurse -Force $overlay -ErrorAction SilentlyContinue }
 
-    # Tex/Mat already live under /Game/AcrXs/Stages/<Id>/… (not relocated); copy into the stage container.
-    foreach ($sub in @('Tex', 'Mat')) {
+    # Tex/Mat/Mesh already live under /Game/AcrXs/Stages/<Id>/… (not relocated); copy into the stage container.
+    foreach ($sub in @('Tex', 'Mat', 'Mesh')) {
         $src = Join-Path $mod ("acr\Content\AcrXs\Stages\$id\$sub")
         if (Test-Path $src) { Copy-Tree $src (Join-Path $outMod "acr\Content\AcrXs\Stages\$id\$sub") }
     }

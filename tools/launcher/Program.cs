@@ -7,9 +7,11 @@ namespace AcrExtraStages;
 internal static class Program
 {
     const string Usage = """
-        AcrExtraStages.exe [command] [options]       no command: interactive menu
+        AcrExtraStages.exe [command] [options]       no command: the UI launcher in your browser
 
         commands:
+          ui           the UI launcher (local page in your browser; --no-browser only prints its address)
+          menu         the console menu
           detect       find Assetto Corsa Rally and DiRT Rally 2.0 (Steam registry + libraryfolders.vdf), save them
           preflight    detect + disk space, build ids, ACR not running, tools, mappings (never starts the game)
           mappings     mappings path check (add --dump to create it: ACR starts briefly)
@@ -29,6 +31,8 @@ internal static class Program
           --no-verify             skip acr-additive verify      --roundtrip   also round-trip the registry tables
           --max-length-km <km>    defer stages longer than this (stage-fit; default 9)
           --keep-temp             keep per-stage scratch folders --copy     copy instead of hard-linking
+          --preview               also write a 3D preview per stage (work\acr\preview\<id>, view with tools\preview)
+          --jobs <n>              stages prepared / built at the same time (default: from cores and RAM, at most 4)
           --ignore-disk-space     warn instead of stopping when free space is below the estimate
           --root <dir>            folder with config\ and work\ (default: next to the exe / the repo root)
           --tools <dir>           folder with <tool>\<tool>.exe  --yes      accept defaults, never prompt
@@ -43,7 +47,7 @@ internal static class Program
         string? cmd = null;
         var named = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var flags = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var valued = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "acr", "dr2", "usmap", "only", "dry-run-mods", "max-length-km", "root", "tools" };
+        var valued = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "acr", "dr2", "usmap", "only", "dry-run-mods", "max-length-km", "root", "tools", "jobs" };
         for (int i = 0; i < argv.Length; i++)
         {
             var a = argv[i];
@@ -83,6 +87,8 @@ internal static class Program
                 Force = flags.Contains("force"),
                 NoVerify = flags.Contains("no-verify"),
                 KeepTemp = flags.Contains("keep-temp"),
+                Preview = flags.Contains("preview"),
+                Jobs = named.TryGetValue("jobs", out var jb) ? int.Parse(jb, CultureInfo.InvariantCulture) : 0,
                 IgnoreDisk = flags.Contains("ignore-disk-space"),
                 Copy = flags.Contains("copy"),
                 MaxLengthKm = named.TryGetValue("max-length-km", out var mk) ? double.Parse(mk, CultureInfo.InvariantCulture) : null,
@@ -100,9 +106,12 @@ internal static class Program
         var roundTrip = flags.Contains("roundtrip");
         try
         {
-            if (interactive) return Menu(c, roundTrip);
+            // a plain double-click opens the UI launcher; `menu` keeps the console menu
+            if (interactive) return GuiServer.Run(c, true);
             return cmd switch
             {
+                "ui" => GuiServer.Run(c, !flags.Contains("no-browser")),
+                "menu" => Menu(c, roundTrip),
                 "detect" => Preflight.Detect(c, false) ? 0 : 1,
                 "preflight" => Preflight.Detect(c, false) & Preflight.Run(c, c.Selection(StagesConfig.Load(c.L.StagesToml)).Count, true).Ok ? 0 : 1,
                 "mappings" => MappingsCmd(c, flags.Contains("dump")),
@@ -124,7 +133,7 @@ internal static class Program
         finally { c.Log?.Dispose(); }
     }
 
-    static string Version => typeof(Program).Assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
+    internal static string Version => typeof(Program).Assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
         .OfType<System.Reflection.AssemblyInformationalVersionAttribute>().FirstOrDefault()?.InformationalVersion.Split('+')[0] ?? "?";
 
     static int Bad(string cmd)
@@ -150,7 +159,7 @@ internal static class Program
         return 1;
     }
 
-    static int UninstallCmd(Ctx c)
+    internal static int UninstallCmd(Ctx c)
     {
         if (c.DryRunMods is null && !Preflight.Detect(c, false) && c.AcrDir is null) return 1;
         if (Preflight.AcrRunning() && c.DryRunMods is null) throw new LauncherException("Assetto Corsa Rally is running: close it first");
@@ -158,7 +167,7 @@ internal static class Program
         return 0;
     }
 
-    static int Build(Ctx c, bool install, bool update, bool roundTrip)
+    internal static int Build(Ctx c, bool install, bool update, bool roundTrip)
     {
         var cfg = StagesConfig.Load(c.L.StagesToml);
         if (!Preflight.Detect(c, !Ui.Yes)) return 1;
@@ -226,7 +235,7 @@ internal static class Program
 
     static string Trunc(string s, int n) => s.Length <= n ? s : s[..(n - 1)] + "…";
 
-    static (string Name, double? Km) StageInfo(Ctx c, StageEntry e)
+    internal static (string Name, double? Km) StageInfo(Ctx c, StageEntry e)
     {
         var p = Path.Combine(c.L.IrRoot, e.Dr2, "stage.json");
         if (!File.Exists(p)) return (e.Dr2, null);

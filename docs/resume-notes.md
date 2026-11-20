@@ -4,6 +4,18 @@
 
 Naming: this project was formerly called acr-dirt. Containers are now `zz_acrxs_*`, package root `/Game/AcrXs/`, ids `AcrXs*`, mods under `mods/additive`, `mods/stage`, `mods/loadproof`. `scripts\install-stages.ps1` removes legacy `zz_acrdirt_*` files too. Everything built before the rename (work/acr/additive/dist, work/acr/batch) is stale: rebuild the registry and every stage container.
 
+## Status at hand-off (2026-11-20)
+
+The project is paused here. Test stage AcrXsFi01r2 (Finland 01 route 2) built from commit 06c19ba is installed and drives without invisible obstacles. All checks pass (invisible-obstacle, road surface, crowd, DR2 material).
+
+What works: DR2 ground bake, real DR2 trees, rocks, fences, banners and start/finish structures; grass along the whole stage kept off the road; native ACR crowds at DR2 spectator spots facing the road; lakes with ACR's M_Water. Builds take about 4.5 min and peak at 15-17 GB RAM.
+
+Open issues, in priority order:
+1. Frame rate (about 65 FPS): the whole stage is one ProceduralMesh (~12M triangles, ~830 sections) drawn every frame with no culling. Next step: split it into spatial chunks (docs/chunking-plan.md; `chunk_mode = "two_existing"` exists but was never validated in game) and thin the far trees.
+2. Grass/ground blend looks off: grass clumps have hard edges against the smooth, blurry ground bake. Next step: a ground material with tiling detail (clone MI_WalesTerrainServicePark / M_ServiceParkTerrain; one calibration build for the mask channels), then denser, lower grass.
+3. Not confirmed in game: spectator facing at 5.3 km, and how the water looks.
+4. Far distance: about 7k DR2 trees beyond the 400 m objects corridor could become cards.
+
 ## State
 
 - Prepare is **done**: `work/acr/batch/prepare.done` = 30 stages, `failed=0`, 9 bake ok, 21 bake_skipped (WSM terrain shaders, no `terrain_array`).

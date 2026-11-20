@@ -80,22 +80,44 @@ internal static class GroundLod
         }
     }
 
-    internal static (List<Vector3> pos, List<uint> idx, JsonObject report) Simplify(ProcMesh.Section s, RouteDistance route, Func<double, double> tolCm)
+    internal static (List<Vector3> pos, List<uint> idx, JsonObject report) Simplify(ProcMesh.Section s, RouteDistance route, Func<double, double> tolCm, double preserveNearM = 0)
+    {
+        var (pos, idx, _, rep) = SimplifyCore(s, route, tolCm, null, 0, preserveNearM: preserveNearM);
+        return (pos, idx, rep);
+    }
+
+    /// Round 2b: the same collapse on a small textured prototype (positions in cm, one UV per vertex), down to `targetTris`
+    /// triangles regardless of error (cheapest collapses first). Vertices are welded by position and UV, so a UV seam is a
+    /// border edge: locked, the texture mapping survives. Returns positions, indices, UVs, report.
+    internal static (List<Vector3> pos, List<uint> idx, List<Vector2> uv, JsonObject report) SimplifyToCount(
+        IReadOnlyList<Vector3> pos, IReadOnlyList<uint> idx, IReadOnlyList<Vector2> uv, int targetTris, bool quiet = true)
+    {
+        var s = new ProcMesh.Section();
+        s.Pos.AddRange(pos); s.Idx.AddRange(idx);
+        return SimplifyCore(s, null, null, uv, targetTris, quiet);
+    }
+
+    static (List<Vector3> pos, List<uint> idx, List<Vector2> uv, JsonObject report) SimplifyCore(
+        ProcMesh.Section s, RouteDistance? route, Func<double, double>? tolCm, IReadOnlyList<Vector2>? uvIn, int targetTris, bool quiet = false, double preserveNearM = 0)
     {
         var clock = System.Diagnostics.Stopwatch.StartNew();
+        void Log(string m) { if (!quiet) Console.WriteLine(m); }
         // weld
-        var weld = new Dictionary<(long, long, long), int>();
+        var weld = new Dictionary<(long, long, long, long, long), int>();
         var P = new List<Vector3>();
+        var PU = new List<Vector2>();
         var remap = new int[s.Pos.Count];
         for (int i = 0; i < s.Pos.Count; i++)
         {
             var p = s.Pos[i];
-            var k = ((long)Math.Round(p.X * 10), (long)Math.Round(p.Y * 10), (long)Math.Round(p.Z * 10));
-            if (!weld.TryGetValue(k, out var w)) { weld[k] = w = P.Count; P.Add(p); }
+            var uv = uvIn is null ? Vector2.Zero : uvIn[i];
+            var k = ((long)Math.Round(p.X * 10), (long)Math.Round(p.Y * 10), (long)Math.Round(p.Z * 10),
+                     (long)Math.Round(uv.X * 4096), (long)Math.Round(uv.Y * 4096));
+            if (!weld.TryGetValue(k, out var w)) { weld[k] = w = P.Count; P.Add(p); PU.Add(uv); }
             remap[i] = w;
         }
         int nT = s.Idx.Count / 3, nV = P.Count;
-        Console.WriteLine($"visuals: ground simplify welded {s.Pos.Count} -> {nV} vertices, {clock.Elapsed.TotalSeconds:0.0} s");
+        Log($"visuals: ground simplify welded {s.Pos.Count} -> {nV} vertices, {clock.Elapsed.TotalSeconds:0.0} s");
         var T = new int[nT * 3];
         var alive = new bool[nT];
         var vt = new List<int>[nV];
@@ -115,9 +137,16 @@ internal static class GroundLod
         long EK(int u, int v) => u < v ? ((long)u << 32) | (uint)v : ((long)v << 32) | (uint)u;
         for (int t = 0; t < nT; t++)
             if (alive[t]) for (int k = 0; k < 3; k++) { var e = EK(T[t * 3 + k], T[t * 3 + (k + 1) % 3]); edgeUse[e] = edgeUse.GetValueOrDefault(e) + 1; }
-        Console.WriteLine($"visuals: ground simplify {edgeUse.Count} edges, {clock.Elapsed.TotalSeconds:0.0} s");
+        Log($"visuals: ground simplify {edgeUse.Count} edges, {clock.Elapsed.TotalSeconds:0.0} s");
         var locked = new bool[nV];
         foreach (var (e, n) in edgeUse) if (n != 2) { locked[(int)(e >> 32)] = true; locked[(int)(e & 0xFFFFFFFF)] = true; }
+
+        int protectedVertices = 0;
+        if (route is not null && preserveNearM > 0)
+            for (int v = 0; v < nV; v++)
+                if (route.Metres(new Vector2(P[v].X, P[v].Y)) <= preserveNearM)
+                { locked[v] = true; protectedVertices++; }
+        Log($"visuals: ground preserve {protectedVertices} vertices within {preserveNearM:0.0} m of route");
 
         // quadrics (symmetric 4x4: a2 ab ac ad b2 bc bd c2 cd d2), in metres
         var Q = new double[nV * 10]; var W = new double[nV];
@@ -142,9 +171,9 @@ internal static class GroundLod
                    + C(7) * z * z + 2 * C(8) * z + C(9);
         }
         var tolM = new double[nV];
-        for (int v = 0; v < nV; v++) tolM[v] = tolCm(route.Metres(new Vector2(P[v].X, P[v].Y))) / 100;
+        for (int v = 0; v < nV; v++) tolM[v] = route is null ? 1e6 : tolCm!(route.Metres(new Vector2(P[v].X, P[v].Y))) / 100;
 
-        Console.WriteLine($"visuals: ground simplify quadrics and route distances, {clock.Elapsed.TotalSeconds:0.0} s");
+        Log($"visuals: ground simplify quadrics and route distances, {clock.Elapsed.TotalSeconds:0.0} s");
         // candidate: (remove r, keep k); cost against min tolerance of both ends
         var heap = new PriorityQueue<(int r, int k), double>();
         bool Best(int u, int v, out int r, out int k, out double cost)
@@ -166,12 +195,12 @@ internal static class GroundLod
                 }
         }
         for (int v = 0; v < nV; v++) if (!locked[v]) PushAround(v);
-        Console.WriteLine($"visuals: ground simplify set up {nT} triangles, {nV} welded vertices, {heap.Count} candidates in {clock.Elapsed.TotalSeconds:0.0} s");
+        Log($"visuals: ground simplify set up {nT} triangles, {nV} welded vertices, {heap.Count} candidates in {clock.Elapsed.TotalSeconds:0.0} s");
 
         var gone = new bool[nV];
-        int collapses = 0, refused = 0;
+        int collapses = 0, refused = 0, aliveTris = alive.Count(x => x);
         var mark = new int[nV]; int stamp = 0;
-        while (heap.TryDequeue(out var cand, out var pc))
+        while ((targetTris <= 0 || aliveTris > targetTris) && heap.TryDequeue(out var cand, out var pc))
         {
             var (r, k) = cand;
             if (gone[r] || gone[k] || locked[r]) continue;
@@ -216,7 +245,7 @@ internal static class GroundLod
                 bool hasK = T[t * 3] == k || T[t * 3 + 1] == k || T[t * 3 + 2] == k;
                 if (hasK)
                 {
-                    alive[t] = false;
+                    alive[t] = false; aliveTris--;
                     for (int j = 0; j < 3; j++) { int o = T[t * 3 + j]; if (o != r) vt[o].Remove(t); }
                 }
                 else
@@ -232,10 +261,10 @@ internal static class GroundLod
             collapses++;
             PushAround(k);
             if (collapses % 100000 == 0)
-                Console.WriteLine($"visuals: ground simplify {collapses} collapses, {heap.Count} queued, {clock.Elapsed.TotalSeconds:0.0} s");
+                Log($"visuals: ground simplify {collapses} collapses, {heap.Count} queued, {clock.Elapsed.TotalSeconds:0.0} s");
         }
 
-        var outPos = new List<Vector3>(); var outIdx = new List<uint>();
+        var outPos = new List<Vector3>(); var outIdx = new List<uint>(); var outUv = new List<Vector2>();
         var newId = new int[nV]; Array.Fill(newId, -1);
         int kept = 0;
         for (int t = 0; t < nT; t++)
@@ -245,7 +274,7 @@ internal static class GroundLod
             for (int j = 0; j < 3; j++)
             {
                 int v = T[t * 3 + j];
-                if (newId[v] < 0) { newId[v] = outPos.Count; outPos.Add(P[v]); }
+                if (newId[v] < 0) { newId[v] = outPos.Count; outPos.Add(P[v]); outUv.Add(PU[v]); }
                 outIdx.Add((uint)newId[v]);
             }
         }
@@ -259,9 +288,9 @@ internal static class GroundLod
             ["degenerate_dropped"] = degenerate,
             ["seconds"] = Math.Round(clock.Elapsed.TotalSeconds, 1),
         };
-        Console.WriteLine($"visuals: ground simplified {nT} -> {kept} triangles ({collapses} collapses, {locked.Count(x => x)} locked border vertices, " +
+        Log($"visuals: ground simplified {nT} -> {kept} triangles ({collapses} collapses, {locked.Count(x => x)} locked border vertices, " +
                           $"{refused} refused) in {clock.Elapsed.TotalSeconds:0.0} s");
-        return (outPos, outIdx, rep);
+        return (outPos, outIdx, outUv, rep);
     }
 
     /// DR2 ground-bake tiles (render/ground_bake/manifest.json, schema ground_bake/1): IR plan bounds per tile.
@@ -325,6 +354,13 @@ internal static class GroundLod
                 {
                     map[v] = nv = (uint)s.Pos.Count;
                     s.Pos.Add(terrain.Pos[(int)v]); s.Nrm.Add(terrain.Nrm[(int)v]);
+                    // Tile splitting changes UV0 only. Keep the road coordinates and
+                    // tangent frame identical on both sides of a section boundary.
+                    if (terrain.Tan.Count == terrain.Pos.Count) s.Tan.Add(terrain.Tan[(int)v]);
+                    if (terrain.Uv1.Count == terrain.Pos.Count) s.Uv1.Add(terrain.Uv1[(int)v]);
+                    if (terrain.Uv2.Count == terrain.Pos.Count) s.Uv2.Add(terrain.Uv2[(int)v]);
+                    if (terrain.Uv3.Count == terrain.Pos.Count) s.Uv3.Add(terrain.Uv3[(int)v]);
+                    s.Color = terrain.Color;
                     if (ti >= 0)
                     {
                         var tl = order[ti];

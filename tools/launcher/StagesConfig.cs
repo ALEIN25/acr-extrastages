@@ -70,7 +70,7 @@ internal sealed record StageEntry(string Id, string Dr2, string LocationKey, str
 /// config/launcher.toml: disk estimates and other launcher defaults (flat key = value lines).
 internal sealed class LauncherConfig
 {
-    public double FreeGbBase = 10;       // vanilla extraction caches, registry, per-stage scratch
+    public string BakeLighting = "dr2"; public double FreeGbBase = 10;       // vanilla extraction caches, registry, per-stage scratch
     public double FreeGbPerStage = 1.5;  // container + prepared DR2 data per stage
     public double FreeGbFullSet = 35;    // cap: the whole curated set
 
@@ -81,7 +81,7 @@ internal sealed class LauncherConfig
         foreach (var raw in File.ReadLines(path))
         {
             var kv = Regex.Match(raw.Trim(), @"^([A-Za-z0-9_]+)\s*=\s*(.+)$");
-            if (!kv.Success || StagesConfig.Value(kv.Groups[2].Value.Trim()) is not double d) continue;
+            if (kv.Success && kv.Groups[1].Value == "bake_lighting") { var v = kv.Groups[2].Value.Trim().Trim((char)34); if (v is not ("none" or "dr2")) throw new ArgumentException("Invalid bake_lighting"); c.BakeLighting = v; continue; } if (!kv.Success || StagesConfig.Value(kv.Groups[2].Value.Trim()) is not double d) continue;
             switch (kv.Groups[1].Value)
             {
                 case "free_gb_base": c.FreeGbBase = d; break;

@@ -171,13 +171,21 @@ internal sealed class DbTable
     /// TSet/TArray of FDBReference: (int32 removed = 0 for sets), int32 count, elements.
     public List<(string table, string row)> ReadDbRefs(byte[] d, bool isSet)
     {
+        var res = ReadDbRefs(d, isSet, out int used);
+        if (used != d.Length) throw new InvalidDataException("DBReference list has trailing bytes");
+        return res;
+    }
+
+    /// The list at the start of <paramref name="d"/>, followed by other values; <paramref name="used"/> = its size in bytes.
+    public List<(string table, string row)> ReadDbRefs(byte[] d, bool isSet, out int used)
+    {
         int p = 0;
         if (isSet && BinaryPrimitives.ReadInt32LittleEndian(d) != 0) throw new InvalidDataException("set with removed elements");
         if (isSet) p += 4;
         int n = BinaryPrimitives.ReadInt32LittleEndian(d.AsSpan(p)); p += 4;
         var res = new List<(string, string)>();
         for (int i = 0; i < n; i++) res.Add(ReadDbRef(d, ref p));
-        if (p != d.Length) throw new InvalidDataException("DBReference list has trailing bytes");
+        used = p;
         return res;
     }
 

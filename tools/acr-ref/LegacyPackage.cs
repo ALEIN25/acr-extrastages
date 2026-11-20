@@ -15,7 +15,10 @@ internal sealed class LegacyPackage
 
     readonly byte[] _header;
     readonly int _namesOffset, _namesEnd, _importsOffset, _exportsOffset, _exportsEnd, _totalHeaderSize;
-    readonly int _origNameCount, _origImportCount;
+    readonly int _origNameCount, _origImportCount, _origExportCount;
+    /// Preload dependencies replaced or added with SetExportDeps / AddExport: export -> {SBS, CBS, SBC, CBC} lists. When any
+    /// exist, Save rebuilds the whole preload dependency array (the exports' first-dependency indices follow).
+    readonly Dictionary<int, List<int>[]> _depOverride = new();
     readonly Dictionary<string, int> _fieldPos = new();
     readonly List<int> _shiftablePos = new(), _generationsPos = new();
     readonly List<string> _names = new();
@@ -102,6 +105,7 @@ internal sealed class LegacyPackage
         int exportCount = Get("ExportCount");
         for (int e = 0; e < exportCount; e++) _exports.Add(d.AsSpan(_exportsOffset + e * ExportSize, ExportSize).ToArray());
         _exportsEnd = _exportsOffset + exportCount * ExportSize;
+        _origExportCount = exportCount;
 
         foreach (var f in new[] { "CellExportOffset", "CellImportOffset", "MetaDataOffset", "DependsOffset", "SoftPackageReferencesOffset",
                                   "SearchableNamesOffset", "ThumbnailTableOffset", "AssetRegistryDataOffset",
@@ -142,6 +146,13 @@ internal sealed class LegacyPackage
     /// counts: SerializationBeforeSerialization, CreateBeforeSerialization, SerializationBeforeCreate, CreateBeforeCreate.
     public List<(string kind, int pos, int index)> ExportDeps(int e)
     {
+        if (_depOverride.TryGetValue(e, out var ov))
+        {
+            var o = new List<(string, int, int)>();
+            string[] ks = ["SBS", "CBS", "SBC", "CBC"];
+            for (int k = 0; k < 4; k++) foreach (var i in ov[k]) o.Add((ks[k], -1, i));
+            return o;
+        }
         int first = BinaryPrimitives.ReadInt32LittleEndian(_exports[e].AsSpan(76));
         var res = new List<(string, int, int)>();
         if (first < 0) return res;
@@ -156,6 +167,7 @@ internal sealed class LegacyPackage
     /// Rewrites one preload dependency in place (positions come from ExportDeps; the region is copied verbatim on save).
     public void SetDep(int pos, int index)
     {
+        if (pos < 0) throw new InvalidOperationException("this export's dependencies were replaced (SetExportDeps / AddExport); use SetExportDeps");
         if (pos < _exportsEnd || pos + 4 > _totalHeaderSize) throw new ArgumentOutOfRangeException(nameof(pos));
         BinaryPrimitives.WriteInt32LittleEndian(_header.AsSpan(pos), index);
     }
@@ -165,6 +177,77 @@ internal sealed class LegacyPackage
     public string ImportClassPackage(int i) => FNameAt(_imports[i], 0);
     public int ImportOuter(int i) => BinaryPrimitives.ReadInt32LittleEndian(_imports[i].AsSpan(16));
     public byte[] ImportEntry(int i) => _imports[i];
+    public byte[] ExportEntry(int e) => (byte[])_exports[e].Clone();
+
+    /// FPackageIndex (negative) of the import with this class package / class / name and outer, 0 if there is none.
+    public int FindImport(string classPackage, string className, string name, int outerIndex)
+    {
+        for (int i = 0; i < _imports.Count; i++)
+            if (ImportName(i) == name && ImportClassName(i) == className && ImportClassPackage(i) == classPackage && ImportOuter(i) == outerIndex) return -(i + 1);
+        return 0;
+    }
+
+    /// Replaces an export's preload dependencies (FPackageIndex values per kind).
+    public void SetExportDeps(int e, IEnumerable<int> sbs, IEnumerable<int> cbs, IEnumerable<int> sbc, IEnumerable<int> cbc) =>
+        _depOverride[e] = [sbs.ToList(), cbs.ToList(), sbc.ToList(), cbc.ToList()];
+
+    /// Appends an export (the last in the export map) and returns its 0-based index; its FPackageIndex is that + 1. The entry is
+    /// copied from entryTemplate (96 bytes, e.g. another export of the same class) with class, super, template, outer, name and
+    /// flags patched; serial size / offset follow from data on Save. Dependencies are given per kind. The depends table grows
+    /// by one empty entry.
+    public int AddExport(byte[] entryTemplate, string name, int classIndex, int superIndex, int templateIndex, int outerIndex, uint flags, byte[] data,
+                         IEnumerable<int> sbs, IEnumerable<int> cbs, IEnumerable<int> sbc, IEnumerable<int> cbc)
+    {
+        if (entryTemplate.Length != ExportSize) throw new ArgumentException("export entry must be 96 bytes");
+        int nameIndex = AddExportName(name);
+        var e = (byte[])entryTemplate.Clone();
+        BinaryPrimitives.WriteInt32LittleEndian(e.AsSpan(0), classIndex);
+        BinaryPrimitives.WriteInt32LittleEndian(e.AsSpan(4), superIndex);
+        BinaryPrimitives.WriteInt32LittleEndian(e.AsSpan(8), templateIndex);
+        BinaryPrimitives.WriteInt32LittleEndian(e.AsSpan(12), outerIndex);
+        BinaryPrimitives.WriteInt32LittleEndian(e.AsSpan(16), nameIndex);
+        BinaryPrimitives.WriteInt32LittleEndian(e.AsSpan(20), 0);
+        BinaryPrimitives.WriteUInt32LittleEndian(e.AsSpan(24), flags);
+        _exports.Add(e);
+        _exportData.Add(data);
+        int idx = _exports.Count - 1;
+        SetExportDeps(idx, sbs, cbs, sbc, cbc);
+        return idx;
+    }
+
+    /// Drops imports (0-based indices) and renumbers the rest: imports' outers, the exports' class / super / template / outer,
+    /// and the preload dependencies are remapped (throws if a kept one still points at a removed import). References inside
+    /// export data are the caller's. Returns old 0-based index -> new 0-based index (-1: removed).
+    public int[] RemoveImports(IEnumerable<int> remove)
+    {
+        var rm = remove.ToHashSet();
+        var map = new int[_imports.Count];
+        int n = 0;
+        for (int i = 0; i < map.Length; i++) map[i] = rm.Contains(i) ? -1 : n++;
+        int Remap(int pi, string what)
+        {
+            if (pi >= 0) return pi;
+            int m = map[-pi - 1];
+            if (m < 0) throw new InvalidOperationException($"{what} still references removed import {pi} ({ImportName(-pi - 1)})");
+            return -(m + 1);
+        }
+        for (int i = 0; i < _imports.Count; i++)
+            if (map[i] >= 0) BinaryPrimitives.WriteInt32LittleEndian(_imports[i].AsSpan(16), Remap(ImportOuter(i), $"import {ImportName(i)}"));
+        for (int e = 0; e < _exports.Count; e++)
+            foreach (var at in new[] { 0, 4, 8, 12 })
+                BinaryPrimitives.WriteInt32LittleEndian(_exports[e].AsSpan(at), Remap(BinaryPrimitives.ReadInt32LittleEndian(_exports[e].AsSpan(at)), $"export {ExportName(e)}"));
+        for (int e = 0; e < _origExportCount; e++)
+            if (!_depOverride.ContainsKey(e))
+                foreach (var d in ExportDeps(e))
+                    BinaryPrimitives.WriteInt32LittleEndian(_header.AsSpan(d.pos), Remap(d.index, $"export {ExportName(e)} dependency"));
+        foreach (var lists in _depOverride.Values)
+            foreach (var l in lists)
+                for (int i = 0; i < l.Count; i++) l[i] = Remap(l[i], "dependency");
+        var kept = _imports.Where((_, i) => map[i] >= 0).ToList();
+        _imports.Clear();
+        _imports.AddRange(kept);
+        return map;
+    }
 
     public int FindName(string s) => _names.IndexOf(s);
     public int FindExport(string name, string? cls = null, Func<int, bool>? pred = null)
@@ -246,8 +329,57 @@ internal sealed class LegacyPackage
         }
         int delta1 = (int)nameBytes.Length - (_namesEnd - _namesOffset);
         int delta2 = (_imports.Count - _origImportCount) * ImportSize;
-        int delta = delta1 + delta2;
-        int newTotal = _totalHeaderSize + delta;
+        int front = delta1 + delta2;                                   // everything from the export map on moves by this
+        int newExports = _exports.Count - _origExportCount;
+        int exportsDelta = newExports * ExportSize;
+
+        // header tail (cell maps, depends, asset registry, preload dependencies, data resources): new exports add an empty depends
+        // entry each, and a changed dependency set rebuilds the preload dependency array
+        int Old(string f) => BinaryPrimitives.ReadInt32LittleEndian(_header.AsSpan(_fieldPos[f]));
+        int dependsOld = Old("DependsOffset"), regOld = Old("AssetRegistryDataOffset"), depsOld = Old("PreloadDependencyOffset"), depsCountOld = Old("PreloadDependencyCount");
+        int depsEndOld = depsOld + depsCountOld * 4;
+        bool rebuildDeps = _depOverride.Count > 0;
+        int dependsGrowth = 0, depsDelta = 0;
+        var newDeps = new List<int>();
+        var firstDep = new int[_exports.Count]; var depCounts = new int[_exports.Count][];
+        if (newExports > 0)
+        {
+            if (regOld - dependsOld != 4 * _origExportCount || regOld > depsOld)
+                throw new NotSupportedException($"depends table is {regOld - dependsOld} bytes for {_origExportCount} exports; cannot add exports");
+            dependsGrowth = newExports * 4;
+        }
+        if (rebuildDeps)
+        {
+            for (int e = 0; e < _exports.Count; e++)
+            {
+                List<int>[] lists;
+                if (_depOverride.TryGetValue(e, out var ov)) lists = ov;
+                else
+                {
+                    var cur = ExportDeps(e);
+                    lists = new[] { "SBS", "CBS", "SBC", "CBC" }.Select(k => cur.Where(d => d.kind == k).Select(d => d.index).ToList()).ToArray();
+                }
+                depCounts[e] = lists.Select(l => l.Count).ToArray();
+                firstDep[e] = depCounts[e].Sum() == 0 ? -1 : newDeps.Count;
+                foreach (var l in lists) newDeps.AddRange(l);
+            }
+            if (depsCountOld > 0 || depsOld >= regOld) depsDelta = (newDeps.Count - depsCountOld) * 4;
+        }
+        int tailLen = _totalHeaderSize - _exportsEnd;
+        int dependsEndRel = regOld - _exportsEnd, depsStartRel = depsOld - _exportsEnd, depsEndRel = depsEndOld - _exportsEnd;
+        using var tail = new MemoryStream();
+        if (!rebuildDeps && newExports == 0) tail.Write(_header, _exportsEnd, tailLen);
+        else
+        {
+            if (depsStartRel < dependsEndRel || depsEndRel > tailLen) throw new NotSupportedException("unexpected header tail layout");
+            tail.Write(_header, _exportsEnd, dependsEndRel);
+            tail.Write(new byte[dependsGrowth]);
+            tail.Write(_header, _exportsEnd + dependsEndRel, depsStartRel - dependsEndRel);
+            if (rebuildDeps) foreach (var d in newDeps) tail.Write(BitConverter.GetBytes(d));
+            else tail.Write(_header, depsOld, depsCountOld * 4);
+            tail.Write(_header, _exportsEnd + depsEndRel, tailLen - depsEndRel);
+        }
+        int newTotal = _totalHeaderSize + front + exportsDelta + dependsGrowth + depsDelta;
 
         var h = new byte[newTotal];
         _header.AsSpan(0, _namesOffset).CopyTo(h);
@@ -261,11 +393,16 @@ internal sealed class LegacyPackage
             var entry = (byte[])_exports[e].Clone();
             BinaryPrimitives.WriteInt64LittleEndian(entry.AsSpan(28), _exportData[e].Length);
             BinaryPrimitives.WriteInt64LittleEndian(entry.AsSpan(36), offset);
+            if (rebuildDeps)
+            {
+                BinaryPrimitives.WriteInt32LittleEndian(entry.AsSpan(76), firstDep[e]);
+                for (int k = 0; k < 4; k++) BinaryPrimitives.WriteInt32LittleEndian(entry.AsSpan(80 + k * 4), depCounts[e][k]);
+            }
             offset += _exportData[e].Length;
             end = offset;
             entry.CopyTo(h, p); p += ExportSize;
         }
-        _header.AsSpan(_exportsEnd, _totalHeaderSize - _exportsEnd).CopyTo(h.AsSpan(p));
+        tail.ToArray().CopyTo(h, p);
 
         void Set32(string f, int v) => BinaryPrimitives.WriteInt32LittleEndian(h.AsSpan(_fieldPos[f]), v);
         Set32("TotalHeaderSize", newTotal);
@@ -274,12 +411,19 @@ internal sealed class LegacyPackage
         Set32("SoftObjectPathsOffset", _namesEnd + delta1);
         Set32("ImportCount", _imports.Count);
         Set32("ImportOffset", _namesEnd + delta1);
+        Set32("ExportCount", _exports.Count);
         Set32("ExportOffset", exportsAt);
         foreach (var pos in _shiftablePos)
         {
             int v = BinaryPrimitives.ReadInt32LittleEndian(h.AsSpan(pos));
-            if (v > 0 && v >= _exportsOffset) BinaryPrimitives.WriteInt32LittleEndian(h.AsSpan(pos), v + delta);
+            if (v <= 0 || v < _exportsOffset) continue;
+            int nv = v + front;
+            if (v >= _exportsEnd) nv += exportsDelta;
+            if (v >= regOld && newExports > 0) nv += dependsGrowth;
+            if (v >= depsEndOld && rebuildDeps) nv += depsDelta;
+            BinaryPrimitives.WriteInt32LittleEndian(h.AsSpan(pos), nv);
         }
+        if (rebuildDeps) Set32("PreloadDependencyCount", newDeps.Count);
         foreach (var g in _generationsPos) BinaryPrimitives.WriteInt32LittleEndian(h.AsSpan(g + 4), _names.Count);
         BinaryPrimitives.WriteInt64LittleEndian(h.AsSpan(_fieldPos["BulkDataStartOffset"]), end);
         if (_dataResources is not null) h = SpliceDataResources(h);

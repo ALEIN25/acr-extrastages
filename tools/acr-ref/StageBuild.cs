@@ -69,6 +69,9 @@ internal static class StageBuild
         public double[] CollisionMin = [], CollisionMax = [];
         public long CollisionTriangles;
         public string Dir = "";
+        public double Runout = 60;
+        public List<V3>? PreviewRoute;
+        public Dictionary<string,V3> PreviewMarkers = new();
 
         public static Ir Load(string dir)
         {
@@ -93,6 +96,33 @@ internal static class StageBuild
             if (ir.Gates.Count != ir.Centre.Count) throw new InvalidDataException("expected one gate per centreline point");
             return ir;
         }
+
+        /// For the placement only: this route with <paramref name="other"/>'s gates appended, so the world box holds both routes.
+        public Ir WithGatesOf(Ir other)
+        {
+            var u = (Ir)MemberwiseClone();
+            u.Gates = Gates.Concat(other.Gates).ToList();
+            return u;
+        }
+
+        /// Largest plan (XZ) distance, m, from one of this route's centreline points to <paramref name="road"/>'s centreline.
+        public double MaxDistanceFrom(Ir road)
+        {
+            double max = 0;
+            foreach (var p in Centre)
+            {
+                double best = double.MaxValue;
+                for (int i = 0; i + 1 < road.Centre.Count; i++)
+                {
+                    double[] a = road.Centre[i], b = road.Centre[i + 1];
+                    double vx = b[0] - a[0], vz = b[2] - a[2], wx = p[0] - a[0], wz = p[2] - a[2], ll = vx * vx + vz * vz;
+                    double t = ll > 0 ? Math.Clamp((vx * wx + vz * wz) / ll, 0, 1) : 0;
+                    best = Math.Min(best, Math.Sqrt((wx - t * vx) * (wx - t * vx) + (wz - t * vz) * (wz - t * vz)));
+                }
+                max = Math.Max(max, best);
+            }
+            return max;
+        }
     }
 
     internal const string PhysMatPrefix = "/Game/Data/Gameplay/PhysicalMaterials/";
@@ -109,9 +139,15 @@ internal static class StageBuild
     static string Need(Options o, string k) => o.Named.TryGetValue(k, out var v) ? v : throw new ArgumentException($"--{k} is required");
     static string F(double v, string fmt = "0.###") => v.ToString(fmt, CultureInfo.InvariantCulture);
 
+    // config/visuals.toml for helpers without options (finish extension): the --visuals path of this run
+    internal static string VisualsToml = Path.Combine("config", "visuals.toml");
+
     public static int Run(Options o)
     {
+        if (o.Named.GetValueOrDefault("visuals") is { Length: > 0 } vt) VisualsToml = vt;
         var ir = Ir.Load(Need(o, "ir"));
+        // the reverse route of the same road, built into the host's reverse variant (gameplay cell 7FF9 + reverse pacenote table)
+        var rev = o.Named.GetValueOrDefault("reverse-ir") is { } revDir ? Ir.Load(revDir) : null;
         var legacy = Need(o, "legacy");
         var outRoot = o.Out ?? throw new ArgumentException("--out <dir> is required");
         var reportPath = o.Named.GetValueOrDefault("report") ?? Path.Combine(outRoot, "stage-report.json");
@@ -123,7 +159,8 @@ internal static class StageBuild
         double groundOffset = double.Parse(o.Named.GetValueOrDefault("ground-offset", "0"), CultureInfo.InvariantCulture);
         bool bounds = o.Named.GetValueOrDefault("bounds") is "1" or "true";
         double boundsMargin = double.Parse(o.Named.GetValueOrDefault("bounds-margin", Bounds.DefaultMarginM.ToString(CultureInfo.InvariantCulture)), CultureInfo.InvariantCulture);
-        var pl = Solve(ir, groundOffset, bounds ? boundsMargin : -1, o.Named.GetValueOrDefault("bounds-prefer-host", "1") is "1" or "true");
+        // one placement for both routes: the world must hold the reverse's start / finish areas too
+        var pl = Solve(rev is null ? ir : ir.WithGatesOf(rev), groundOffset, bounds ? boundsMargin : -1, o.Named.GetValueOrDefault("bounds-prefer-host", "1") is "1" or "true");
         if (pl.World is not null) UseWorld(pl.World);
         Console.WriteLine($"placement: theta {F(pl.ThetaDeg)} deg about DR2 ({F(pl.Cx)}, {F(pl.Cz)}), t = ({F(pl.Tx)}, {F(pl.Dy)}, {F(pl.Tz)}) m, slack {F(pl.Slack, "0.#")} m");
         if (pl.World is { } pw)
@@ -160,7 +197,11 @@ internal static class StageBuild
             if (vo.Ground != "collision") report["options"]!["visuals_ground"] = vo.Ground;
             if (vo.GroundLod) report["options"]!["visuals_ground_lod"] = true;
             if (vo.GroundBake is not null) report["options"]!["visuals_ground_bake"] = vo.GroundBake;
+            if (vo.InstancingLegacy is not null) report["options"]!["instancing_legacy"] = vo.InstancingLegacy;
         }
+        var finishConfig = o.Named.GetValueOrDefault("visuals") is { } vc ? Toml.Load(vc) : null;
+        ir.Runout = finishConfig is not null && finishConfig["stage"].TryGetValue("finish_runout_m", out var value) ? Convert.ToDouble(value) : 60;
+        if (rev is not null) rev.Runout = ir.Runout;
         var road = Road(ir, pl);
 
         // Kunos' track physics only knows the surfaces listed in DA_PhysMaterialsMappingCommon; a collider whose physical
@@ -174,14 +215,24 @@ internal static class StageBuild
         report["surface_registry"] = new JsonObject { ["registered"] = registry.Count, ["remapped"] = remap };
         if (remap.Count > 0) Console.WriteLine($"surfaces: remapped unregistered {string.Join(", ", remap.Select(kv => kv.Key))} -> {groundFallback}");
 
-        int hostColliders = BuildBaked(ir, pl, legacy, outRoot, report, objectsCfg is null ? null : Toml.Load(objectsCfg), road, registry, out var objectShapes);
+        int hostColliders = BuildBaked(ir, pl, legacy, outRoot, report, objectsCfg is null ? null : Toml.Load(objectsCfg), road, registry, out var objectShapes, out var finishBaked);
         report["host_collider_count"] = hostColliders;
-        var cellInfo = BuildCell(o, ir, pl, legacy, outRoot, report, respawnMode, road, objectShapes, packageRoot);
-        BuildTables(o, ir, legacy, outRoot, keepPacenotes, additive, report, pacenoteMap is null ? null : Toml.Load(pacenoteMap), cellInfo);
+        Dr2Materials? dr2 = null;
+        var cellInfo = BuildCell(o, ir, pl, legacy, outRoot, report, respawnMode, road, objectShapes, packageRoot, HostPaths.Forward, ref dr2);
+        finishBaked();   // BakedData with the object colliders as the forward cell left them
+        BuildTables(o, ir, legacy, outRoot, keepPacenotes, additive, report, pacenoteMap is null ? null : Toml.Load(pacenoteMap), cellInfo, HostPaths.Forward);
+        if (rev is not null)
+        {
+            report["reverse"] = new JsonObject { ["stage"] = rev.Id, ["name"] = rev.Name, ["length_m"] = rev.LengthM, ["max_off_road_m"] = Math.Round(rev.MaxDistanceFrom(ir), 1) };
+            Console.WriteLine($"reverse: {rev.Id} ({rev.Name}, {F(rev.LengthM / 1000, "0.##")} km) -> {HostPaths.Reverse.CellName}");
+            var revInfo = BuildCell(o, rev, pl, legacy, outRoot, report, respawnMode, Road(rev, pl), objectShapes, packageRoot, HostPaths.Reverse, ref dr2, ir);
+            BuildTables(o, rev, legacy, outRoot, keepPacenotes, additive, report, pacenoteMap is null ? null : Toml.Load(pacenoteMap), revInfo, HostPaths.Reverse);
+        }
         if (o.Named.GetValueOrDefault("scenery") is { } sceneryCfg)
         {
             report["options"]!["scenery"] = sceneryCfg;
-            report["scenery"] = Scenery.Build(legacy, outRoot, Toml.Load(sceneryCfg), o.Usmap, o.Named.GetValueOrDefault("scenery-actor-hidden") == "1");
+            report["scenery"] = Scenery.Build(legacy, outRoot, Toml.Load(sceneryCfg), o.Usmap, o.Named.GetValueOrDefault("scenery-actor-hidden") == "1",
+                rev is null ? null : Toml.Load(o.Named.GetValueOrDefault("variants", Path.Combine("config", "variants.toml"))));
         }
         if (o.Named.GetValueOrDefault("names") is { } namesCfg)
         {
@@ -200,13 +251,16 @@ internal static class StageBuild
             report["sky"] = Sky.Build(legacy, outRoot, Toml.Load(skyCfg), o, skySection);
         }
         if (bounds)
-            report["bounds"] = Bounds.Build(legacy, outRoot, pl.World!, o);
+            report["bounds"] = Bounds.Build(legacy, outRoot, pl.World!, o, rev is not null);
 
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(reportPath))!);
         File.WriteAllText(reportPath, report.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
         Console.WriteLine($"report -> {reportPath}");
 
-        int failures = Check(outRoot, ir, pl, hostColliders, Console.Out, report);
+        // The build's cells, meshes and textures are dead here: return their memory before the checks re-read the cells.
+        System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
+        GC.Collect(2, GCCollectionMode.Forced, blocking: true, compacting: true);
+        int failures = Check(outRoot, ir, pl, hostColliders, Console.Out, report, o.Usmap);
         return failures == 0 ? 0 : 5;
     }
 
@@ -217,8 +271,14 @@ internal static class StageBuild
         return new RoadProbe(Road(ir, pl), surf, cfg, RoadSurfaces.For(cfg.Arr("road", "surfaces"), surf, ir.Centre.Select(pl.ToUe).ToList()));
     }
 
-    internal static RoadCorridor Road(Ir ir, Placement pl) =>
-        new(ir.Centre.Select(pl.ToUe).ToList(), ir.Gates.Select(g => pl.ToUe(g.left)).ToList(), ir.Gates.Select(g => pl.ToUe(g.right)).ToList());
+    internal static RoadCorridor Road(Ir ir, Placement pl)
+    {
+        var c = ir.Centre.Select(pl.ToUe).ToList();
+        var l = ir.Gates.Select(g => pl.ToUe(g.left)).ToList();
+        var r = ir.Gates.Select(g => pl.ToUe(g.right)).ToList();
+        ExtendFinishRoad(ir, pl, c, l, r);
+        return new(c, l, r);
+    }
 
     static bool InPhysicsBounds(V3 p) => p.X >= PhysMinX && p.X <= PhysMaxX && p.Z >= PhysMinZ && p.Z <= PhysMaxZ;
 
@@ -327,7 +387,7 @@ internal static class StageBuild
     }
 
     static int BuildBaked(Ir ir, Placement pl, string legacy, string outRoot, JsonObject report, Toml? objectsCfg, RoadCorridor road,
-                          HashSet<string> registry, out ObjectColliders.Result? objectShapes)
+                          HashSet<string> registry, out ObjectColliders.Result? objectShapes, out Action finish)
     {
         var path = HostPaths.Resolve(legacy, HostPaths.Baked);
         var pkg = new LegacyPackage(path);
@@ -456,7 +516,7 @@ internal static class StageBuild
         string AssetOf(Chunk c) => c.Material.StartsWith('/') ? c.Material : ir.Materials[c.Material];
 
         var reference = colliders[HostTemplateCollider];
-        using var ms = new MemoryStream();
+        var ms = new MemoryStream();
         ms.Write(data, 0, countAt);
         ms.Write(BitConverter.GetBytes(colliders.Count + all.Count));
         ms.Write(data, countAt + 4, simpleStart - countAt - 4);
@@ -471,6 +531,10 @@ internal static class StageBuild
             ?? throw new InvalidOperationException($"no always-active (None) key in the {which} stride map");
         NoneKey(meshMap, "mesh").Strides.Add(new BakedEdit.Stride { Index = (uint)colliders.Count, Num = (uint)all.Count });
 
+        // the object colliders are serialised by finish(), after the visuals of the forward cell have run: instanced trees' capsules are fitted to their real trunks there
+        // (Instancing.FitColliders), which needs the instancing plan
+        void Finish()
+        {
         int simpleAdded = 0;
         if (objs is not null && objs.Kept.Any(s => s.MeshPhysics is null))
         {
@@ -494,6 +558,8 @@ internal static class StageBuild
             ms.Write(BakedEdit.WriteMap(simpleMap));
             ms.Write(simpleMapData, sp, simpleMapData.Length - sp);
             r["simple_added"] = simpleAdded;
+            // the DR2 instance of each added simple entry, in file order (ColliderFit.CheckColliders pairs the written capsules with their trees by it)
+            r["simple_instances"] = new JsonArray(objs.Kept.Where(s => s.MeshPhysics is null).Select(s => (JsonNode)s.Instance).ToArray());
             r["simple_stride"] = $"{{{hostSimple}, {simpleAdded}}} in the None key";
             r["object_owner"] = System.Text.Encoding.ASCII.GetString(owner[20..^1]);
         }
@@ -512,6 +578,8 @@ internal static class StageBuild
         r["dr2_triangles_per_material"] = new JsonObject(perMaterial.Select(kv => KeyValuePair.Create(kv.Key, (JsonNode?)kv.Value)));
         r["uexp_bytes"] = $"{data.Length} -> {outData.Length}";
         Console.WriteLine($"BakedData: {colliders.Count} host + {all.Count} DR2 colliders, uexp {data.Length} -> {outData.Length} bytes");
+        }
+        finish = Finish;
         objectShapes = objs;
         return colliders.Count;
     }
@@ -551,7 +619,7 @@ internal static class StageBuild
 
     // ---------------- gameplay cell ----------------
 
-    sealed class Polyline
+    internal sealed class Polyline
     {
         public readonly List<V3> P;
         public readonly double[] S;
@@ -596,18 +664,22 @@ internal static class StageBuild
         }
     }
 
+    /// One direction's gameplay cell (forward 22VG, reverse 7FF9): splines, timing actors, respawn walls and the DR2 visuals of
+    /// <paramref name="ir"/>'s route. Both cells get the same visuals (each variant streams only its own cell); <paramref name="dr2"/>
+    /// is shared so the DR2 textures are written once.
     static CellInfo BuildCell(Options o, Ir ir, Placement pl, string legacy, string outRoot, JsonObject report, string respawnMode, RoadCorridor road,
-                              ObjectColliders.Result? objectShapes, string? packageRoot = null)
+                              ObjectColliders.Result? objectShapes, string? packageRoot, HostPaths.Direction dir, ref Dr2Materials? dr2,
+                              Ir? visualsIr = null)
     {
-        var path = HostPaths.Resolve(legacy, HostPaths.Cell);
+        visualsIr ??= ir;   // the reverse cell draws the forward IR's ground / render (prepared with --also over both roads)
+        var path = HostPaths.Resolve(legacy, dir.Cell);
         var cell = new LegacyPackage(path);
         var r = new JsonObject();
-        report["cell"] = r;
+        report[dir == HostPaths.Forward ? "cell" : "reverse_cell"] = r;
 
         // host component transforms via CUE4Parse (floats), located in the legacy bytes as doubles
         using var provider = Program.Open(o);
-        var gamePath = "acr/Content/Levels/WalesS4HafrenSouth/_Generated_/22VG0QIP9ATUQI633K86KWPFP.umap";
-        var objs = provider.LoadPackage(gamePath).GetExports().ToList();
+        var objs = provider.LoadPackage(dir.CellGamePath).GetExports().ToList();
         if (objs.Count != cell.ExportCount || Enumerable.Range(0, objs.Count).Any(i => objs[i].Name != cell.ExportName(i)))
             throw new InvalidDataException("CUE4Parse export order differs from the legacy package");
 
@@ -615,6 +687,7 @@ internal static class StageBuild
         var centre = ir.Centre.Select(pl.ToUe).ToList();
         var left = ir.Gates.Select(g => pl.ToUe(g.left)).ToList();
         var right = ir.Gates.Select(g => pl.ToUe(g.right)).ToList();
+        ExtendFinishRoad(ir, pl, centre, left, right);
         var contour = new List<V3>();
         V3 Push(V3 edge, V3 c)
         {
@@ -679,26 +752,38 @@ internal static class StageBuild
 
         double hostStart = hostLine.Project(Loc(objs[sectors[0]])).s, hostFinish = hostLine.Project(Loc(objs[sectors[3]])).s;
         double hostEnd = hostLine.Project(Loc(objs[endTrigger])).s;
-        double newEnd = SGate(finish.gate) + (hostEnd - hostFinish);
+        double finishS = FinishArch(ir, pl, newLine, SGate(finish.gate));
+        var finishCfg = o.Named.GetValueOrDefault("visuals") is { } fc ? Toml.Load(fc) : null;
+        double runout = ir.Runout;
+        double newEnd = finishS + runout * 100;
+        if (newEnd > newLine.Length) throw new InvalidDataException("Finish runout exceeds extended road");
         var dr2Stop = ir.Triggers.FirstOrDefault(t => t.type == "VehicleBox" && t.name.StartsWith("EndSequenceTrigger", StringComparison.OrdinalIgnoreCase));
-        if (dr2Stop.position is not null) newEnd = newLine.Project(pl.ToUe(dr2Stop.position)).s;
+        
+        ir.PreviewRoute = centre;
+        ir.PreviewMarkers["finish"] = newLine.At(finishS, 0, 0, out _);
+        ir.PreviewMarkers["end trigger"] = newLine.At(newEnd, 0, 0, out _);
+        ir.PreviewMarkers["DR2 flying finish"] = pl.ToUe(ir.Gates[finish.gate].crossing);
         double minS = 500, maxS = newLine.Length - 1500;
 
+        // where DR2 starts the clock at (or near) its first gate, the line moves on so the car still gets its 12 m run-up
+        double lineS = Math.Max(SGate(start.gate), minS + 1500);
         var plan = new List<(string role, int comp, double s)>
         {
-            ("CompleStart (car start point)", completStart, SGate(start.gate) + hostLine.Project(Loc(objs[completStart])).s - hostStart),
-            ("StartSequenceTrigger", startTrigger, SGate(start.gate) + hostLine.Project(Loc(objs[startTrigger])).s - hostStart),
-            ("RaceSector0 (start line)", sectors[0], SGate(start.gate)),
+            // the car waits 12 m before the line (just behind the start trigger), not Hafren's 127 m: DR2's run-up is often
+            // shorter and holds the parked start-area vehicles, so the host offset clamped the car onto the run-up's first metres
+            ("CompleStart (car start point)", completStart, lineS - 1200),
+            ("StartSequenceTrigger", startTrigger, lineS + hostLine.Project(Loc(objs[startTrigger])).s - hostStart),
+            ("RaceSector0 (start line)", sectors[0], lineS),
             ($"RaceSector1 (split, DR2 gate {splitA})", sectors[1], SGate(splitA)),
             ($"RaceSector2 (split, DR2 gate {splitB})", sectors[2], SGate(splitB)),
-            ($"RaceSector3 (finish, DR2 gate {finish.gate})", sectors[3], SGate(finish.gate)),
+            ($"RaceSector3 (finish, DR2 gate {finish.gate})", sectors[3], finishS),
             ("EndSequenceTrigger (stop zone)", endTrigger, newEnd),
             ("PostRaceCamera", postCam, newEnd + hostLine.Project(Loc(objs[postCam])).s - hostEnd),
         };
         var actors = new JsonArray();
         foreach (var (role, comp, s0) in plan)
         {
-            double s = Math.Clamp(s0, minS, maxS);
+            double s = comp == sectors[3] || comp == endTrigger ? s0 : Math.Clamp(s0, minS, maxS);
             var obj = objs[comp];
             var hostLoc = Loc(obj);
             var (_, lat, upOff, hHead) = hostLine.Project(hostLoc);
@@ -739,15 +824,19 @@ internal static class StageBuild
         {
             var vopt = Visuals.Options.From(o.Named);
             var vcfg = Toml.Load(visualsCfg);
-            var dr2 = vopt.Dr2 ? new Dr2Materials(vcfg, ir.Dir, legacy, outRoot, packageRoot) : null;
-            r["visuals"] = Visuals.Build(cell, ir, pl, vcfg, vopt, objectShapes, InPhysicsBounds, dr2);
+            r["crowds"] = Crowds.Plan(ir, pl, vcfg, road, p =>
+                InPhysicsBounds(new V3(p.X / 100, p.Z / 100, p.Y / 100)) && p.Z / 100 >= PhysMinY && p.Z / 100 <= PhysMaxY);
+            if (vopt.Dr2) dr2 ??= new Dr2Materials(vcfg, visualsIr.Dir, legacy, outRoot, packageRoot);
+            r["visuals"] = Visuals.Build(cell, visualsIr, pl, vcfg, vopt, objectShapes, InPhysicsBounds, vopt.Dr2 ? dr2 : null);
+            CrowdEmission.Emit(cell, legacy, o.Usmap, vcfg, (JsonObject)r["crowds"]!, centre, Visuals.GroundSurface(cell, r["visuals"]));
+            if (r["crowds"]!["actors_emitted"]!.GetValue<int>() > 0) CrowdEmission.CopyBlueprint(legacy, outRoot);
         }
         r["actors"] = actors;
         r["dr2_centre_length_m"] = newLine.Length / 100;
         foreach (var a in actors) Console.WriteLine($"  {a}");
-        cell.SaveTo(Path.Combine(outRoot, HostPaths.Cell + Path.GetExtension(path)));
+        cell.SaveTo(Path.Combine(outRoot, dir.Cell + Path.GetExtension(path)));
 
-        double sm(double cm) => Math.Clamp(cm, minS, maxS) / 100;
+
         double PolyToSpline(double polyCm)
         {
             int i = Array.BinarySearch(newLine.S, polyCm);
@@ -756,7 +845,78 @@ internal static class StageBuild
             double u = (polyCm - newLine.S[i]) / Math.Max(1e-9, newLine.S[i + 1] - newLine.S[i]);
             return gateS[i] + u * (gateS[i + 1] - gateS[i]);
         }
-        return new CellInfo(gateS, centre, PolyToSpline(SGate(start.gate)), PolyToSpline(SGate(finish.gate)), PolyToSpline(sm(newEnd) * 100));
+        return new CellInfo(gateS, centre, PolyToSpline(lineS),PolyToSpline(finishS), PolyToSpline(newEnd));
+    }
+
+    // Select the first marked stop-control arch after the authored flying finish.
+    static double FinishArch(Ir ir, Placement pl, Polyline line, double flying)
+    {
+        var objects = JsonNode.Parse(File.ReadAllText(Path.Combine(ir.Dir, "stage.json")))!["objects"];
+        var candidates = new List<(double s, V3 p)>();
+        foreach (var inst in objects?["instances"]?.AsArray() ?? [])
+        {
+            if (!inst!["template"]!.GetValue<string>().Contains("startfinish", StringComparison.OrdinalIgnoreCase)) continue;
+            var pos = Vector3.Transform(Vector3.Zero, ObjectColliders.Trs(inst["transform"]));
+            var point = pl.ToUe([pos.X, pos.Y, pos.Z]);
+            var projection = line.Project(point);
+            if (projection.s >= flying && projection.s <= flying + 40000) candidates.Add((projection.s, point));
+        }
+        if (candidates.Count == 0) return flying;
+        var nearest = candidates.MinBy(c => c.s);
+        ir.PreviewMarkers["DR2 arch"] = nearest.p;
+        return (line.At(nearest.s, 0, 0, out _) - nearest.p).Length <= 600 ? nearest.s : flying;
+    }
+
+    // Follow transverse slices of the actual collision road, preserving every authored gate.
+    static void ExtendFinishRoad(Ir ir, Placement pl, List<V3> centre, List<V3> left, List<V3> right)
+    {
+        var surface = new SurfaceGrid(Path.Combine(ir.Dir, "collision.glb"), pl);
+        var cfg = Toml.Load(VisualsToml);
+        var materials = RoadSurfaces.For(cfg.Arr("road", "surfaces"), surface, centre);
+        materials.UnionWith(cfg.Arr("road", "surfaces").Cast<string>());
+        foreach (var q in centre) if (surface.At(q.X / 100, q.Y / 100) is { } code) materials.Add(code);
+        var stop = ir.Triggers.FirstOrDefault(t => t.type == "VehicleBox" && t.name.StartsWith("EndSequenceTrigger", StringComparison.OrdinalIgnoreCase));
+        var origin = centre[^1];
+        double target = 40000 + ir.Runout * 100 + 3000;
+        double distance = 0;
+        while (distance < target)
+        {
+            var p = centre[^1]; var d = p - centre[^2];
+            double norm = Math.Sqrt(d.X * d.X + d.Y * d.Y);
+            var forward = new V3(d.X / norm, d.Y / norm, 0);
+            var side = new V3(-forward.Y, forward.X, 0);
+            var probe = p + forward * 200;
+            bool Road(double offset)
+            {
+                var q = probe + side * offset;
+                return surface.At(q.X / 100, q.Y / 100) is { } m && materials.Contains(m)
+                    && surface.HeightAt(q.X / 100, q.Y / 100) is { } h && Math.Abs(h * 100 - p.Z) < 300;
+            }
+            double seed = Enumerable.Range(-20, 41).Select(i => i * 25.0).OrderBy(Math.Abs).FirstOrDefault(Road, double.NaN);
+            // the road may end before the wished-for length (Finland 01 route 5: 407 m): enough once DR2's stop trigger + 30 m is covered
+            if (double.IsNaN(seed)) { Console.WriteLine($"finish extension stopped at {distance / 100:0.0} m: no road surface within search/height tolerance"); break; }
+            double lo = seed, hi = seed;
+            while (lo > -2000 && Road(lo - 25)) lo -= 25;
+            while (hi < 2000 && Road(hi + 25)) hi += 25;
+            if (lo <= -2000 || hi >= 2000) throw new InvalidDataException("Unbounded finish road surface slice");
+            var next = probe + side * ((lo + hi) / 2);
+            next = new V3(next.X, next.Y, surface.HeightAt(next.X / 100, next.Y / 100)!.Value * 100);
+            if (surface.At(next.X / 100, next.Y / 100) is not { } drawn || !materials.Contains(drawn)) { Console.WriteLine($"finish extension stopped at {distance / 100:0.0} m: midpoint outside road"); break; }
+            distance += (next - p).Length;
+            centre.Add(next);
+            double sign = (left[^1] - p).X * side.X + (left[^1] - p).Y * side.Y;
+            left.Add(new V3(probe.X + side.X * (sign > 0 ? hi : lo), probe.Y + side.Y * (sign > 0 ? hi : lo), next.Z));
+            right.Add(new V3(probe.X + side.X * (sign > 0 ? lo : hi), probe.Y + side.Y * (sign > 0 ? lo : hi), next.Z));
+            var line = new Polyline(centre);
+            double flying = line.S[ir.Gates.Count - 1];
+            double finish = FinishArch(ir, pl, line, flying);
+            if (ir.PreviewMarkers.TryGetValue("DR2 arch", out var arch))
+            {
+                target = (arch - origin).Length + ir.Runout * 100 + 3000;
+                if ((line.At(finish, 0, 0, out _) - arch).Length <= 600 && distance >= target) break;
+            }
+        }
+        Console.WriteLine($"finish extension length {distance / 100:0.0} m; target {target / 100:0.0} m");
     }
 
     static double NormDeg(double d) { d %= 360; return d > 180 ? d - 360 : d <= -180 ? d + 360 : d; }
@@ -786,12 +946,15 @@ internal static class StageBuild
 
     // ---------------- DataTables ----------------
 
-    static void BuildTables(Options o, Ir ir, string legacy, string outRoot, bool keepPacenotes, bool additive, JsonObject report, Toml? pacenoteMap, CellInfo cell)
+    static void BuildTables(Options o, Ir ir, string legacy, string outRoot, bool keepPacenotes, bool additive, JsonObject report, Toml? pacenoteMap, CellInfo cell,
+                            HostPaths.Direction dir)
     {
         var r = new JsonObject();
-        report["tables"] = r;
+        report[dir == HostPaths.Forward ? "tables" : "reverse_tables"] = r;
 
-        if (additive)
+        if (dir != HostPaths.Forward)
+            r["tracks_variants"] = "skipped (reverse; the registry carries Length)";
+        else if (additive)
             r["tracks_variants"] = "skipped (--additive; registry carries Length)";
         else
         {
@@ -809,7 +972,7 @@ internal static class StageBuild
             r["tracks_variants"] = $"Hafren South FullForward Length 4.8 -> {F(km)} km";
         }
 
-        var ppath = HostPaths.Resolve(legacy, HostPaths.Pacenote);
+        var ppath = HostPaths.Resolve(legacy, dir.Pacenote);
         var pace = new LegacyPackage(ppath);
         if (keepPacenotes) { r["pacenotes"] = "kept host (Hafren South) table"; return; }
         if (pacenoteMap is not null)
@@ -832,10 +995,11 @@ internal static class StageBuild
             table.Rows = Pacenotes.Generate(tokens, ToSpline, curve, cell.StartS, cell.FinishS, cell.StopS, pacenoteMap, pr, placements,
                                             o.Named.GetValueOrDefault("pacenote-assignment"));
             pace.SetExportData(0, Pacenotes.Write(table, pace));
-            pace.SaveTo(Path.Combine(outRoot, HostPaths.Pacenote + Path.GetExtension(ppath)));
+            pace.SaveTo(Path.Combine(outRoot, dir.Pacenote + Path.GetExtension(ppath)));
             pr["host_rows_replaced"] = hostRows;
             if (o.Named.GetValueOrDefault("pacenote-report") is { } reportPath)
             {
+                if (dir != HostPaths.Forward) reportPath = Path.ChangeExtension(reportPath, null) + "-" + dir.Name + Path.GetExtension(reportPath);
                 var greedy = new List<Pacenotes.Placement>();
                 var greedyRows = Pacenotes.Generate(tokens, ToSpline, curve, cell.StartS, cell.FinishS, cell.StopS, pacenoteMap, new JsonObject(), greedy, "greedy");
                 var (mis, hints, corners) = Pacenotes.Report(table.Rows, curve, cell.StartS, pacenoteMap, ir.Name, reportPath, placements, greedyRows, greedy);
@@ -850,7 +1014,7 @@ internal static class StageBuild
         }
         var pd = pace.GetExportData(0);
         using var provider = Program.Open(o);
-        var dt = provider.LoadPackage("acr/Content/Data/Pacenote/Tables/DT_PacenoteHafrenSouthForward.uasset").GetExports().OfType<CUE4Parse.UE4.Assets.Exports.Engine.UDataTable>().Single();
+        var dt = provider.LoadPackage(dir.PacenoteGamePath).GetExports().OfType<CUE4Parse.UE4.Assets.Exports.Engine.UDataTable>().Single();
         int rows = dt.RowMap.Count;
         // rows are the tail of the export: ..., int32 NumRows, rows (FName key + struct)
         int countAt = -1;
@@ -866,8 +1030,8 @@ internal static class StageBuild
         var trimmed = new byte[countAt + 4];
         Array.Copy(pd, trimmed, countAt);
         pace.SetExportData(0, trimmed);
-        pace.SaveTo(Path.Combine(outRoot, HostPaths.Pacenote + Path.GetExtension(ppath)));
-        r["pacenotes"] = $"DT_PacenoteHafrenSouthForward: {rows} rows -> 0";
+        pace.SaveTo(Path.Combine(outRoot, dir.Pacenote + Path.GetExtension(ppath)));
+        r["pacenotes"] = $"{Path.GetFileName(dir.Pacenote)}: {rows} rows -> 0";
     }
 
     static int UniqueIndexOf(byte[] d, byte[] pattern)
@@ -889,14 +1053,23 @@ internal static class StageBuild
             p["world"] is { } wn ? World.FromJson(wn) : null);
         if (pl.World is not null) UseWorld(pl.World);
         using var w = o.Out is null ? Console.Out : new StreamWriter(o.Out);
-        int failures = Check(Need(o, "legacy"), ir, pl, report["host_collider_count"]!.GetValue<int>(), w, report);
+        int failures = Check(Need(o, "legacy"), ir, pl, report["host_collider_count"]!.GetValue<int>(), w, report, o.Usmap);
         return failures == 0 ? 0 : 5;
     }
 
-    static int Check(string root, Ir ir, Placement pl, int hostCount, TextWriter w, JsonNode report)
+    static int Check(string root, Ir ir, Placement pl, int hostCount, TextWriter w, JsonNode report, string usmap)
     {
         Advisory.Load(report["options"]?["visuals"]?.GetValue<string>());
         int failures = 0;
+        // One read of each gameplay cell for every check (Visuals.Drawn caches its parsed sections per instance).
+        LegacyPackage? fwdCell = null, revCell = null;
+        LegacyPackage CellPkg(string cellPath) => cellPath == HostPaths.Cell ? fwdCell ??= new LegacyPackage(HostPaths.Resolve(root, HostPaths.Cell))
+            : cellPath == HostPaths.Reverse.Cell ? revCell ??= new LegacyPackage(HostPaths.Resolve(root, HostPaths.Reverse.Cell))
+            : new LegacyPackage(HostPaths.Resolve(root, cellPath));
+        foreach (var (key, cellPath) in new[] { ("cell", HostPaths.Cell), ("reverse_cell", HostPaths.Reverse.Cell) })
+            if (report[key]?["crowds"] is { } crowds)
+                failures += CrowdEmission.Check(root, cellPath, usmap, crowds, w,
+                    Visuals.GroundSurface(CellPkg(cellPath), report[key]?["visuals"]));
         void C(bool ok, string what) { w.WriteLine($"{Advisory.Verdict(ok, what, out var bad)} {what}"); if (bad) failures++; }
 
         bool additive = report["options"]?["additive"]?.GetValue<bool>() == true;
@@ -926,10 +1099,16 @@ internal static class StageBuild
                 vo["visuals_ground_lod"]?.GetValue<bool>() ?? false, vo["visuals_ground_bake"]?.GetValue<string>());
             RoadProbe? probe = vo["objects"]?.GetValue<string>() is { } objCfg
                 ? NewProbe(ir, pl, objCfg) : null;
-            failures += Visuals.Check(new LegacyPackage(HostPaths.Resolve(root, HostPaths.Cell)), ir, pl, Toml.Load(visualsCfg), opt, w,
+            failures += Visuals.Check(CellPkg(HostPaths.Cell), ir, pl, Toml.Load(visualsCfg), opt, w,
                                       report["cell"]?["visuals"], probe, root, report["options"]?["package_root"]?.GetValue<string>());
+            // instanced trees: both gameplay cells carry them (each variant streams only its own cell); the mesh packages are shared, checked once
+            if (report["cell"]?["visuals"]?["instancing"] is { } instReport)
+                failures += Instancing.Check(CellPkg(HostPaths.Cell), root, ir, pl, Toml.Load(visualsCfg), instReport, report["cell"]!["visuals"]!, InPhysicsBounds, w, "instancing (forward cell):", meshes: true);
+            if (report["reverse_cell"]?["visuals"]?["instancing"] is { } revInstReport)
+                failures += Instancing.Check(CellPkg(HostPaths.Reverse.Cell), root, ir, pl, Toml.Load(visualsCfg), revInstReport, report["reverse_cell"]!["visuals"]!, InPhysicsBounds, w, "instancing (reverse cell):", meshes: false);
         }
 
+        revCell = null;   // the reverse cell (and its cached sections) is not read again
         if (report["options"]?["scenery"]?.GetValue<string>() is { } sceneryCfg)
             failures += Scenery.Check(root, Toml.Load(sceneryCfg), new Options().Usmap, w, report["scenery"]);
         if (!additive && report["options"]?["names"]?.GetValue<string>() is { } namesCfg)
@@ -962,6 +1141,20 @@ internal static class StageBuild
                                      (x, y) => surf.At(x / 100, y / 100) is { } s && roadSurf.Contains(s), w);
         }
         C(meshMap.Any(e => e.Strides.Any(s => s.Index == hostCount && s.Num == dr2.Count)), $"always-active stride {{{hostCount}, {dr2.Count}}} present");
+
+        // physics against visuals: no collider may stand above what is drawn (InvisibleCheck)
+        if (report["options"]?["visuals"]?.GetValue<string>() is { } invCfg && report["baked"]?["simple_added"] is { } invAdded)
+        {
+            var gcell = CellPkg(HostPaths.Cell);
+            var (drawn, secNames) = Visuals.Drawn(gcell, report["cell"]?["visuals"]);
+            var shapes = InvisibleCheck.SimpleShapes(data, simple, invAdded.GetValue<int>());
+            Action<InvisibleCheck.Drawn, int>? instDraw = null; Func<InvisibleCheck.Shape, double?>? instBase = null;
+            if (report["cell"]?["visuals"]?["instancing"] is { } instRep) (instDraw, instBase) = Instancing.FromCell(gcell, root, instRep);
+            if (report["cell"]?["visuals"]?["instancing"] is { } instRep2)
+                failures += ColliderFit.CheckColliders(root, ir, pl, Toml.Load(report["options"]!["visuals"]!.GetValue<string>()), instRep2, shapes, ((JsonArray)report["baked"]!["simple_instances"]!).Select(x => x!.GetValue<string>()).ToList(), InPhysicsBounds, w);
+            failures += InvisibleCheck.Check(InvisibleCheck.Settings.From(Toml.Load(invCfg)), ir, pl, dr2, shapes, drawn, secNames, w, report as JsonObject,
+                                             instDraw, instBase);
+        }
         float hostTop = cols.Take(hostCount).Max(c => c.Max.Y);
         float dr2Min = dr2.Min(c => c.Min.Y);
         C(hostTop < dr2Min, $"host colliders flattened below DR2 ground: host top y {hostTop:0.##} m < DR2 min y {dr2Min:0.##} m");
@@ -1007,12 +1200,18 @@ internal static class StageBuild
         }
         C(missLine == 0, $"ground raycast every <=1 m along the centreline: {samples} samples, {missLine} without ground (max |dy| to the chord {maxLine * 100:0.#} cm)");
 
-        var cell = new LegacyPackage(HostPaths.Resolve(root, HostPaths.Cell));
+        var cell = CellPkg(HostPaths.Cell);
         var cs = Splines.SplitComponent(cell.GetExportData(cell.FindExport("CenterSpline", "DMSplineComponent"))).Curves;
         double len = cs.Reparam.Points[^1].InVal / 100;
         double polyLen = 0;
         for (int i = 1; i < ir.Centre.Count; i++) polyLen += (pl.ToPhysics(ir.Centre[i]) - pl.ToPhysics(ir.Centre[i - 1])).Length;
-        C(cs.Position.Points.Count == ir.Centre.Count && Math.Abs(len - polyLen) < polyLen * 0.01,
+        double routeLen = new Polyline(cs.Position.Points.Take(ir.Centre.Count).Select(p => V3.From(p.Out)).ToList()).Length / 100;
+        var extension = cs.Position.Points.Skip(ir.Centre.Count).Select(p => V3.From(p.Out)).ToList();
+        var drawnSurface = new SurfaceGrid(Path.Combine(ir.Dir,"collision.glb"),pl);
+        var drawnCodes = RoadSurfaces.For(Toml.Load(VisualsToml).Arr("road","surfaces"),drawnSurface,ir.Centre.Select(pl.ToUe).ToList());
+        double worst = extension.Any(p => drawnSurface.At(p.X/100,p.Y/100) is not { } m || !drawnCodes.Contains(m)) ? double.PositiveInfinity : 0;
+        C(worst <= 2, $"extension worst offset from drawn road: {worst} m (limit 2 m)");
+        C(cs.Position.Points.Count > ir.Centre.Count && len >= polyLen && Math.Abs(routeLen - polyLen) < polyLen * 0.01,
             $"CenterSpline: {cs.Position.Points.Count} points, length {len:0.#} m (DR2 centreline polyline {polyLen:0.#} m)");
         var first = pl.ToUe(ir.Centre[0]);
         C((V3.From(cs.Position.Points[0].Out) - first).Length < 1, "CenterSpline starts at the DR2 run-up (first gate) and runs in driving order");
@@ -1125,7 +1324,8 @@ internal static class StageBuild
         if (rep["source"]!.GetValue<string>() == "dr2" && wishes > 0)
         {
             int used = rep["rows_called_with_dr2_value"]!.GetValue<int>() + rep["dr2_disagrees_geometry_used"]!.GetValue<int>();
-            C(distRows.Count > 0 && used >= wishes * 0.6,
+            // 60% of the DR2 calls, or all but one: a route with only a couple of calls may drop one for a short gap
+            C(distRows.Count > 0 && (used >= wishes * 0.6 || used >= wishes - 1),
               $"distance calls: {used} of {wishes} DR2 distance calls became a row ({rep["rows_called_with_dr2_value"]} as spoken, {rep["rows_short_gap_with_dr2_value"]} of those on a 20-40 m gap, {rep["dr2_disagrees_geometry_used"]} overruled by the geometry); " +
               $"{rep["dr2_dropped_short_gap"]} dropped (gap under {shortMin:0} m or short call over {shortMax:0} m), {rep["dr2_dropped_corner_not_adjacent"]} dropped (corner after finish / reordered), {rep["dr2_null_value"]} of unknown value left to the geometry");
         }

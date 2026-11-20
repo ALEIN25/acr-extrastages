@@ -21,6 +21,16 @@ internal sealed class Dr2Materials
     readonly Dictionary<string, string> _textures = new(), _mics = new();
     public readonly JsonArray Log = new();
     public long TextureBytes;
+    public int CacheHits, CacheMisses;   // encoded-texture cache (<ir>/texcache)
+    /// For Preview: texture package -> its first written mip (format, size, blocks); MIC package -> base colour texture package.
+    public readonly Dictionary<string, (Dds.Fmt fmt, int w, int h, byte[] mip)> TexMip0 = new();
+    public readonly Dictionary<string, string> MicBase = new();
+    /// The legacy template root, the mod output root and the package root of this stage's written packages (Instancing).
+    public string Legacy => _legacy;
+    public string OutRoot => _outRoot;
+    public string PackageRoot => _root;
+    /// The instanced-tree plan of this stage-build (Instancing.Prepare runs once; both gameplay cells use it).
+    internal Instancing.Plan? InstancingPlan;
     public int TextureCount => _textures.Count;
     public int MicCount => _mics.Count;
     string? _orm, _normal;
@@ -52,6 +62,34 @@ internal sealed class Dr2Materials
     public string Texture(string name, Dds.Fmt fmt, bool linear, int w, int h, IReadOnlyList<byte[]> mips)
     {
         if (_textures.TryGetValue(name, out var known)) return known;
+        // Optional linear-light exposure compensation; data textures must remain untouched.
+        double gain = _cfg["albedo_compensation"].TryGetValue(name, out var setting)
+            ? Convert.ToDouble(setting) : 1;
+        if (!double.IsFinite(gain) || gain <= 0) throw new InvalidDataException("Albedo gain must be finite and positive: " + name);
+        if (!linear && gain != 1)
+        {
+            var adjusted = new List<byte[]>();
+            for (int level = 0; level < mips.Count; level++)
+            {
+                int width = Math.Max(1, w >> level), height = Math.Max(1, h >> level);
+                var pixels = fmt == Dds.Fmt.BC7 ? Preview.DecodeBc7(mips[level], width, height)
+                    : Dds.DecodeBlocks(fmt, mips[level], width, height);
+                for (int i = 0; i < pixels.Length; i += 4)
+                    for (int c = 0; c < 3; c++)
+                    {
+                        double v = pixels[i + c] / 255.0;
+                        v = (v <= .04045 ? v / 12.92 : Math.Pow((v + .055) / 1.055, 2.4)) * gain;
+                        pixels[i + c] = (byte)Math.Clamp(Math.Round(255 * (v <= .0031308 ? 12.92 * v : 1.055 * Math.Pow(v, 1 / 2.4) - .055)), 0, 255);
+                    }
+                var encoder = new BCnEncoder.Encoder.BcEncoder(fmt == Dds.Fmt.BC1
+                    ? BCnEncoder.Shared.CompressionFormat.Bc1 : BCnEncoder.Shared.CompressionFormat.Bc3);
+                encoder.OutputOptions.GenerateMipMaps = false;
+                adjusted.Add(encoder.EncodeToRawBytes(pixels, width, height, BCnEncoder.Encoder.PixelFormat.Rgba32)[0]);
+            }
+            mips = adjusted;
+            fmt = fmt == Dds.Fmt.BC1 ? Dds.Fmt.BC1 : Dds.Fmt.BC3;
+            Log.Add($"{name}: linear albedo gain {gain}");
+        }
         int first = 0;
         while (first < mips.Count - 1 && Math.Max(w >> first, h >> first) > _maxSize) first++;
         int mw = Math.Max(1, w >> first), mh = Math.Max(1, h >> first);
@@ -89,6 +127,10 @@ internal sealed class Dr2Materials
         pkg.SaveTo(file);
         TextureBytes += new FileInfo(Path.ChangeExtension(file, ".uexp")).Length;
         Log.Add($"{path}: {PixelFormat(fmt)} {(linear ? "linear" : "sRGB")} {mw}x{mh}, {payloads.Count} mips{(first > 0 ? $" ({first} above {_maxSize} dropped)" : "")}, from {name}");
+        // preview: the first mip at most 1024 px wide (a reference to the data already in memory)
+        int pm = first;
+        while (pm < mips.Count - 1 && Math.Max(w >> pm, h >> pm) > 1024) pm++;
+        TexMip0[path] = (fmt, Math.Max(1, w >> pm), Math.Max(1, h >> pm), mips[pm]);
         return _textures[name] = path;
     }
 
@@ -155,21 +197,78 @@ internal sealed class Dr2Materials
         return Texture(name, dds.Format, linear, dds.Width, dds.Height, dds.Mips);
     }
 
-    string Orm()
+    string Orm(bool road = false)
     {
+        // the road tiles may have an ORM of their own ([dr2_textures] road_orm: a rougher, drier gravel than the objects)
+        if (road && _cfg["dr2_textures"].ContainsKey("road_orm"))
+        {
+            var rc = _cfg.Arr("dr2_textures", "road_orm").Select(x => Convert.ToByte(x)).ToArray();
+            var rp = new byte[16 * 4];
+            for (int i = 0; i < 16; i++) { rp[i * 4] = rc[0]; rp[i * 4 + 1] = rc[1]; rp[i * 4 + 2] = rc[2]; rp[i * 4 + 3] = 255; }
+            return Texture("flat_orm_road", Dds.Fmt.BC1, true, 4, 4, [Dds.EncodeBc1(rp, 4, 4)]);
+        }
         var c = _cfg.Arr("dr2_textures", "orm").Select(x => Convert.ToByte(x)).ToArray();
         var px = new byte[16 * 4];
         for (int i = 0; i < 16; i++) { px[i * 4] = c[0]; px[i * 4 + 1] = c[1]; px[i * 4 + 2] = c[2]; px[i * 4 + 3] = 255; }
         return _orm ??= Texture("flat_orm", Dds.Fmt.BC1, true, 4, 4, [Dds.EncodeBc1(px, 4, 4)]);
     }
 
+    /// A flat-colour MIC (rgb) for object classes with no stage texture of their own: neutral concrete / plaster grey
+    /// instead of a texture of the wrong material (the mossy rock the fallback picked for buildings and walls).
+    public string NeutralMic(IReadOnlyList<byte> rgb)
+    {
+        var px = new byte[16 * 4];
+        for (int i = 0; i < 16; i++) { px[i * 4] = rgb[0]; px[i * 4 + 1] = rgb[1]; px[i * 4 + 2] = rgb[2]; px[i * 4 + 3] = 255; }
+        return Mic("cls_neutral", Texture("neutral_grey", Dds.Fmt.BC1, false, 4, 4, [Dds.EncodeBc1(px, 4, 4)]));
+    }
+
+    /// Lakes and rivers: a clone of ACR's only surface water, MI_LoutrakiOcean (parent /Game/Environments/RallyShared/Materials/
+    /// M_Water: opaque, three scrolling world-space normal maps, SSR and Fresnel; no UVs needed). [water] colour (linear RGB)
+    /// replaces its WaterColor and wave_size its WaveSize (the template values below, each present once in the export).
+    public string WaterMic(IReadOnlyList<double> linear, double waveSize)
+    {
+        // preview / gallery colour only: the same colour as an sRGB swatch
+        byte S(double v) => (byte)Math.Clamp(Math.Round(255 * (v <= .0031308 ? 12.92 * v : 1.055 * Math.Pow(v, 1 / 2.4) - .055)), 0, 255);
+        var px = new byte[16 * 4];
+        for (int i = 0; i < 16; i++) { px[i * 4] = S(linear[0]); px[i * 4 + 1] = S(linear[1]); px[i * 4 + 2] = S(linear[2]); px[i * 4 + 3] = 255; }
+        var swatch = Texture("water_colour", Dds.Fmt.BC1, false, 4, 4, [Dds.EncodeBc1(px, 4, 4)]);
+        return MicFrom("water_mic_template", "water", swatch, [],
+            [(0.03814f, (float)linear[0]), (0.130685f, (float)linear[1]), (0.197917f, (float)linear[2]), (3000f, (float)waveSize)]);
+    }
+
+    /// The DR2 trunk diffuse (<template>_tr_d, foliage_trunk.fx) of a material, null if it is not a trunk material or the
+    /// texture is not usable. ObjectDiffuse skips foliage shaders, so trunks have their own lookup.
+    public string? TrunkDiffuse(JsonNode material)
+    {
+        if (!(material["shader_group"]?.GetValue<string>() ?? "").Contains("foliage_trunk", StringComparison.OrdinalIgnoreCase)) return null;
+        var tex = material["textures"]?.AsArray().FirstOrDefault(t => t!["parameter"]!.GetValue<string>().StartsWith("TDiffuse"));
+        if (tex is null) return null;
+        var r = tex["texture"]!.GetValue<string>();
+        var dds = Path.ChangeExtension(r[(r.IndexOf('#') + 1)..], null);
+        return Usable(dds) ? dds : null;
+    }
+
     string Normal() => _normal ??= Texture("flat_normal", Dds.Fmt.BC5, true, 4, 4, [Dds.SolidBc5(128, 128)]);
 
     /// A MaterialInstanceConstant (path returned) with the given base colour texture, the flat ORM and normal.
-    public string Mic(string name, string baseColor)
+    public string Mic(string name, string baseColor, string? normal = null) =>
+        MicFrom("mic_template", name, baseColor, [("mic_base_texture", baseColor), ("mic_orm_texture", Orm()), ("mic_normal_texture", normal ?? Normal())]);
+
+    /// Ground bake MIC: the base colour plus a tiling detail normal (detail_mic_template, M_Simple with Simple_Use_Detail_Normal),
+    /// `tiling` repeats per UV unit and `strength` replacing the template's DetailNormalTiling / DetailNormalStrength.
+    public string DetailMic(string name, string baseColor, string detailNormal, float tiling, float strength, bool road = false) =>
+        MicFrom("detail_mic_template", name, baseColor,
+            [("detail_mic_base_texture", baseColor), ("detail_mic_orm_texture", Orm(road)), ("detail_mic_normal_texture", Normal()), ("detail_mic_detail_texture", detailNormal)],
+            [((float)_cfg.Num("dr2_textures", "detail_mic_tiling"), tiling), ((float)_cfg.Num("dr2_textures", "detail_mic_strength"), strength)]);
+
+    /// MIC cloned from the template [dr2_textures] tplKey: each texture import named by a config key is renamed to the new
+    /// texture package; each scalar given as (template value, new value) is replaced at every occurrence of its float bytes
+    /// in the export: the cooked ScalarParameterValues plus one cached copy per material quality level (MI_MonBolStoneWallC:
+    /// DetailNormalTiling 10 and DetailNormalStrength 3 sit side by side at 5 places).
+    string MicFrom(string tplKey, string name, string baseColor, (string key, string tex)[] textures, (float old, float value)[]? scalars = null)
     {
         if (_mics.TryGetValue(name, out var known)) return known;
-        var tpl = _cfg.Str("dr2_textures", "mic_template");
+        var tpl = _cfg.Str("dr2_textures", tplKey);
         var pkg = new LegacyPackage(LegacyFile(tpl));
         var path = $"{_root}/Mat/MI_{Clean(name)}";
         void Rename(string from, string to)
@@ -179,22 +278,169 @@ internal sealed class Dr2Materials
             pkg.RenameName(i, to);
         }
         string Obj(string p) => p[(p.LastIndexOf('/') + 1)..];
-        foreach (var (key, tex) in new[] { ("mic_base_texture", baseColor), ("mic_orm_texture", Orm()), ("mic_normal_texture", Normal()) })
+        foreach (var (key, tex) in textures)
         {
             var old = _cfg.Str("dr2_textures", key);
             int imp = Enumerable.Range(0, pkg.ImportCount).Single(i => pkg.ImportName(i) == Obj(old) && pkg.ImportClassName(i) == "Texture2D");
             Rename(pkg.ImportName(-pkg.ImportOuter(imp) - 1), tex);
             Rename(Obj(old), Obj(tex));
         }
+        if (scalars is { Length: > 0 })
+        {
+            var data = pkg.GetExportData(0);
+            foreach (var (old, value) in scalars)
+            {
+                var pat = BitConverter.GetBytes(old);
+                int hits = 0;
+                for (int at = data.AsSpan().IndexOf(pat); at >= 0; at = data.AsSpan(at + 4).IndexOf(pat) is var nx && nx >= 0 ? at + 4 + nx : -1)
+                {
+                    BitConverter.GetBytes(value).CopyTo(data, at);
+                    hits++;
+                }
+                if (hits == 0) throw new InvalidDataException($"{tpl}: scalar value {old} not found");
+            }
+            pkg.SetExportData(0, data);
+        }
+        if (tplKey == "leaf_mic_template")
+        {
+            var data = pkg.GetExportData(0);
+            foreach (var parameter in new[] { "SharedBend", "SharedOscillation", "SharedSpeed", "SharedTurbulence", "SharedFlexibility", "Branch1Bend", "Branch1Oscillation", "Branch1Speed", "Branch1Turbulence", "Branch1Flexibility", "Branch2Bend", "Branch2Oscillation", "Branch2Speed", "Branch2Turbulence", "Branch2Flexibility", "RippleSpeed", "RippleFlexibility", "RippleShimmer", "CameraFadeEnable" })
+            {
+                int index = pkg.FindName(parameter);
+                if (index < 0) continue;
+                // FMaterialParameterInfo: FName, association byte, index int.
+                var pattern = BitConverter.GetBytes(index).Concat(new byte[5]).Concat(BitConverter.GetBytes(-1)).ToArray();
+                int hits = 0;
+                for (int at = 1; at + pattern.Length + 4 <= data.Length; at++)
+                    if (data.AsSpan(at, pattern.Length).SequenceEqual(pattern))
+                    {
+                        if (parameter == "CameraFadeEnable") data[at - 1] = 0;
+                        else Array.Clear(data, at + pattern.Length, 4);
+                        hits++;
+                    }
+                if (hits == 0) Log.Add($"{tpl}: parameter {parameter} not found in the expected layout; left as in the template");
+            }
+            pkg.SetExportData(0, data);
+        }
         Rename(pkg.ExportName(0), Obj(path));
         Rename(pkg.PackageName, path);
         pkg.SetPackageName(path);
         pkg.SaveTo(Path.Combine(_outRoot, "acr", "Content", path["/Game/".Length..].Replace('/', Path.DirectorySeparatorChar) + ".uasset"));
-        Log.Add($"{path}: base colour {baseColor}");
+        Log.Add($"{path}: base colour {baseColor}" + (textures.Length > 3 ? $", detail normal {textures[3].tex}" : "") +
+                (scalars is { Length: > 0 } ? $", scalars {string.Join(", ", scalars.Select(s => $"{s.old}->{s.value:0.##}"))}" : ""));
+        MicBase[path] = baseColor;
         return _mics[name] = path;
     }
 
+    /// A DR2 normal map (DDS in the stage textures) as a BC5 Texture2D (X in R, Y in G, as UE's normal maps): DXT5 normal
+    /// maps that keep X in alpha (R nearly constant) are swizzled; BC7 / BC1 / BC3 are decoded and re-encoded. Null if absent.
+    public string? NormalTexture(string ddsName, int maxSize = 0, bool breakRepeat = false)
+    {
+        var p = Path.Combine(_texDir, ddsName + ".dds");
+        if (!File.Exists(p)) return null;
+        Dds d;
+        try { d = new Dds(p); } catch (NotSupportedException) { return null; }
+        if (d.Format is Dds.Fmt.BC4 || d.Width <= 8) return null;   // 4x4 stand-ins
+        int limit = maxSize > 0 ? Math.Min(maxSize, _maxSize) : _maxSize;
+        int m = Enumerable.Range(0, d.Mips.Count).First(i => Math.Max(d.MipWidth(i), d.MipHeight(i)) <= limit || i == d.Mips.Count - 1);
+        int w = d.MipWidth(m), h = d.MipHeight(m);
+        bool xInAlpha = false;
+        var mips = Cached($"bc5|{ddsName}|{limit}|{breakRepeat}", p, () =>
+        {
+            // decoding is as slow as encoding for BC7 sources: both only on a cache miss
+            var px = d.Format == Dds.Fmt.BC7 ? Preview.DecodeBc7(d.Mips[m], w, h) : d.Decode(m)!;
+            int n = w * h;
+            double Var(int c) { double s = 0, s2 = 0; for (int i = 0; i < n; i += 7) { s += px[i * 4 + c]; s2 += px[i * 4 + c] * (double)px[i * 4 + c]; } int k = (n + 6) / 7; return s2 / k - s / k * (s / k); }
+            xInAlpha = d.Format == Dds.Fmt.BC3 && Var(3) > 4 * Var(0);
+            var rg = new byte[n * 4];
+            for (int i = 0; i < n; i++) { rg[i * 4] = xInAlpha ? px[i * 4 + 3] : px[i * 4]; rg[i * 4 + 1] = px[i * 4 + 1]; rg[i * 4 + 3] = 255; }
+            if (breakRepeat)
+            {
+                // Blend a second periodic, rotated sample; rotate its XY vector too.
+                var source = (byte[])rg.Clone();
+                for (int y = 0; y < h; y++) for (int x = 0; x < w; x++)
+                {
+                    int a = (y * w + x) * 4;
+                    int sx = (y * w / h + w / 3) % w;
+                    int sy = (h - 1 - x * h / w + h / 5) % h;
+                    int b = (sy * w + sx) * 4;
+                    rg[a] = (byte)Math.Clamp(128 + .7 * (source[a] - 128) - .3 * (source[b + 1] - 128), 0, 255);
+                    rg[a + 1] = (byte)Math.Clamp(128 + .7 * (source[a + 1] - 128) + .3 * (source[b] - 128), 0, 255);
+                }
+            }
+            var enc = new BCnEncoder.Encoder.BcEncoder(BCnEncoder.Shared.CompressionFormat.Bc5);
+            enc.OutputOptions.GenerateMipMaps = true;
+            enc.OutputOptions.Quality = BCnEncoder.Encoder.CompressionQuality.Fast;
+            return enc.EncodeToRawBytes(rg, w, h, BCnEncoder.Encoder.PixelFormat.Rgba32).ToList();
+        });
+        Log.Add($"{ddsName}: normal map {d.Format} {w}x{h}{(xInAlpha ? " (X from alpha)" : "")} -> BC5 (encoded copies cached in texcache)");
+        return Texture(ddsName + "_bc5", Dds.Fmt.BC5, true, w, h, mips);
+    }
+
+    /// Encoded mips of a texture conversion, cached in <ir>/texcache across builds: the key is the conversion and its
+    /// settings plus the source DDS's size and write time, so a re-extracted or changed source is encoded again.
+    List<byte[]> Cached(string key, string source, Func<List<byte[]>> encode)
+    {
+        var fi = new FileInfo(source);
+        var full = $"{key}|{fi.Length}|{fi.LastWriteTimeUtc.Ticks}";
+        var hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(full)))[..24];
+        var path = Path.Combine(_irDir, "texcache", hash + ".bin");
+        if (File.Exists(path))
+        {
+            try
+            {
+                using var r = new BinaryReader(File.OpenRead(path));
+                int count = r.ReadInt32();
+                var cached = new List<byte[]>(count);
+                for (int i = 0; i < count; i++) cached.Add(r.ReadBytes(r.ReadInt32()));
+                CacheHits++;
+                return cached;
+            }
+            catch (EndOfStreamException) { }   // a cut-off file: encode again
+        }
+        var mips = encode();
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        var tmp = path + ".part";
+        using (var w2 = new BinaryWriter(File.Create(tmp)))
+        {
+            w2.Write(mips.Count);
+            foreach (var m in mips) { w2.Write(m.Length); w2.Write(m); }
+        }
+        File.Move(tmp, path, overwrite: true);
+        CacheMisses++;
+        return mips;
+    }
+
+    /// The DR2 normal map paired with a diffuse in the stage's terrain materials: ..._d -> ..._n by name, else the
+    /// TNormal[Map]N beside the TDiffuse[SpecMap]N that names it (texture-array slices keep their slice suffix).
+    readonly Dictionary<string, JsonArray> _matJson = new();
+
+    public string? PairedNormal(string diffuse)
+    {
+        var slice = Regex.Match(diffuse, @"_slice\d+$").Value;
+        var bare = slice.Length > 0 ? diffuse[..^slice.Length] : diffuse;
+        if (bare.EndsWith("_d") && File.Exists(Path.Combine(_texDir, bare[..^2] + "_n" + slice + ".dds"))) return bare[..^2] + "_n" + slice;
+        foreach (var f in new[] { "terrain.materials.json", "terrain_low.materials.json", "objects.materials.json" })
+        {
+            var path = Path.Combine(_irDir, "render", f);
+            if (!File.Exists(path)) continue;
+            foreach (var mat in _matJson.TryGetValue(path, out var cached) ? cached : _matJson[path] = JsonNode.Parse(File.ReadAllText(path))!.AsArray())
+            {
+                var tx = mat!["textures"]!.AsArray().ToDictionary(t => t!["parameter"]!.GetValue<string>(), t => { var s = t!["texture"]!.GetValue<string>(); return Path.ChangeExtension(s[(s.IndexOf('#') + 1)..], null); });
+                foreach (var (k, v) in tx)
+                {
+                    if (v != bare || !k.StartsWith("TDiffuse")) continue;
+                    var nk = k.Replace("TDiffuseSpecMap", "TNormalMap").Replace("TDiffuse", "TNormal");
+                    if (tx.TryGetValue(nk, out var nv) && File.Exists(Path.Combine(_texDir, nv + slice + ".dds"))) return nv + slice;
+                }
+            }
+        }
+        return null;
+    }
+
     // ---- stand-in textures for stages whose location is not the one config/visuals.toml names ----------------------------
+
+    public bool HasTexture(string name) => Usable(name);
 
     bool Usable(string name)
     {
@@ -363,11 +609,12 @@ internal sealed class Dr2Materials
 
     /// Objects: the DR2 material's diffuse (TDiffuseAlphaMap / TDiffuse*), null if not usable: no texture, a shader in
     /// object_skip_shaders (alpha-tested foliage, decals), or an unsupported format.
-    public string? ObjectDiffuse(JsonNode material, out string? why)
+    public string? ObjectDiffuse(JsonNode material, out string? why, bool foliage = false)
     {
         why = null;
         var shader = material["shader_group"]?.GetValue<string>() ?? "";
-        if (_cfg.Arr("dr2_textures", "object_skip_shaders").Cast<string>().Any(s => shader.Contains(s))) { why = $"shader {shader}"; return null; }
+        // foliage = the real near trees (round 3): foliage / foliage_trunk shaders are allowed there (not the billboard one); decals, blends, glass... still skipped
+        if (_cfg.Arr("dr2_textures", "object_skip_shaders").Cast<string>().Any(s => shader.Contains(s) && !(foliage && s == "foliage" && !shader.Contains("billboard")))) { why = $"shader {shader}"; return null; }
         var tex = material["textures"]!.AsArray().FirstOrDefault(t => t!["parameter"]!.GetValue<string>().StartsWith("TDiffuse"));
         if (tex is null) { why = "no diffuse texture"; return null; }
         var r = tex["texture"]!.GetValue<string>();
@@ -381,12 +628,213 @@ internal sealed class Dr2Materials
             if (File.Exists(slice0)) path = slice0;
             else { why = "diffuse not exported from DR2"; return null; }
         }
-        try { _ = new Dds(path); }
+        try
+        {
+            // DR2's location / route texture files hold 4x4 stand-ins of textures whose full version is in a patchup file;
+            // one that is left drew its objects black
+            if (new Dds(path) is { Width: <= 8, Height: <= 8 }) { why = "4x4 stand-in (full texture not exported)"; return null; }
+        }
         catch (NotSupportedException e) { why = $"unsupported DDS ({e.Message[(e.Message.IndexOf(':') + 2)..]})"; return null; }
         return dds;
     }
 
-    public string ObjectMic(string diffuse) => Mic("obj_" + diffuse, Texture(diffuse));
+    /// Object material: masked (cut-out, two-sided) when the diffuse has more than masked_min_transparent transparent texels,
+    /// else the opaque M_Simple MIC.
+    /// With the diffuse's own DR2 normal map ([dr2_textures] object_normal_max_size), when it has one.
+    public string ObjectMic(string diffuse)
+    {
+        var normal = ObjectNormal(diffuse);
+        return Transparency(diffuse) > _cfg.Num("dr2_textures", "masked_min_transparent")
+            ? MaskedMic("objm_" + diffuse, Texture(diffuse), normal) : Mic("obj_" + diffuse, Texture(diffuse), normal);
+    }
+
+    public string TreeLeafMic(string diffuse)
+    {
+        var mode = _cfg.Str("vegetation", "foliage_material");
+        if (mode == "masked")
+        {
+            bool normalMaps = !_cfg["vegetation"].TryGetValue("foliage_normal_maps", out var setting) || setting is true;
+            if (setting is not null && setting is not bool)
+                throw new InvalidDataException("vegetation.foliage_normal_maps must be a boolean");
+            if (normalMaps) return ObjectMic(diffuse);
+            return Transparency(diffuse) > _cfg.Num("dr2_textures", "masked_min_transparent")
+                ? MaskedMic("leaf_flat_" + diffuse, Texture(diffuse)) : Mic("leaf_flat_" + diffuse, Texture(diffuse));
+        }
+        if (mode != "speedtree") throw new InvalidDataException("Unknown vegetation.foliage_material: " + mode);
+        return LeafMic("leaf_" + diffuse, Texture(diffuse));
+    }
+
+    /// Far-tree card material: [vegetation] card_material = "leaf" draws the billboard strip with the foliage leaf MIC
+    /// (two-sided foliage shading, light through the leaves, flat normal) instead of the props masked MIC with DR2's billboard
+    /// normal strip, which lit the cards near black in game. "masked" keeps the old material.
+    public string CardMic(string cardDds)
+    {
+        var mode = _cfg["vegetation"].TryGetValue("card_material", out var v) && v is string s ? s : "masked";
+        if (mode == "leaf") return LeafMic("cardleaf_" + cardDds, CardTexture(cardDds));
+        if (mode != "masked") throw new InvalidDataException("vegetation.card_material must be masked or leaf");
+        return MaskedMic("card_" + cardDds, CardTexture(cardDds), CardNormal(cardDds));
+    }
+
+    public string LeafMic(string name, string colour)
+    {
+        // Flat RG normal and constant roughness in both remaining channels.
+        var pixels = Enumerable.Range(0, 16).SelectMany(_ => new byte[] { 128, 128, 255, 255 }).ToArray();
+        var encoder = new BCnEncoder.Encoder.BcEncoder(BCnEncoder.Shared.CompressionFormat.Bc3);
+        encoder.OutputOptions.GenerateMipMaps = false;
+        var packedNormal = Texture("leaf_flat_packed", Dds.Fmt.BC3, true, 4, 4,
+            encoder.EncodeToRawBytes(pixels, 4, 4, BCnEncoder.Encoder.PixelFormat.Rgba32).ToList());
+        var path = MicFrom("leaf_mic_template", name, colour,
+            [("leaf_mic_base_texture", colour), ("leaf_mic_normal_texture", packedNormal), ("leaf_mic_subsurface_texture", colour)]);
+        MaskedMics.Add(path);
+        return path;
+    }
+
+    /// The DR2 normal map paired with an object or class diffuse, as a BC5 texture package (null: flat normal).
+    public string? ObjectNormal(string diffuse) =>
+        ProcNormalMaps && PairedNormal(diffuse) is { } n ? NormalTexture(n, (int)_cfg.Num("dr2_textures", "object_normal_max_size")) : null;
+
+    /// [dr2_textures] object_normal_maps: DR2 normal maps on the procedural sections (objects, bark, class and rock sections).
+    /// Leave false until UV tangents and the paired maps have passed an in-game check.
+    public bool ProcNormalMaps => _cfg["dr2_textures"].TryGetValue("object_normal_maps", out var v) && v is true;
+
+    // Bypasses object_normal_maps to inspect maps before enabling them in game.
+    public string? PreviewNormal(string baseTexture)
+    {
+        var diffuse = _textures.FirstOrDefault(kv => kv.Value == baseTexture).Key;
+        return diffuse is not null && PairedNormal(diffuse) is { } n
+            ? NormalTexture(n, (int)_cfg.Num("dr2_textures", "object_normal_max_size")) : null;
+    }
+
+    /// Round 3: a tree billboard strip (<template>_lod_d, BC3 cut-out) for the far cards. The colour under the transparent texels
+    /// is whatever DR2's atlas left there (dark), which the filtering and mips pull into the leaf edges as a dark fringe: the colour
+    /// of the opaque texels is spread card_dilate_px into the transparent ones (alpha unchanged), and all colour is multiplied by
+    /// [vegetation] card_brightness. Re-encoded as BC3 with mips (cached).
+    public string CardTexture(string ddsName)
+    {
+        var path = Path.Combine(_texDir, ddsName + ".dds");
+        var dds = new Dds(path);
+        int m = Enumerable.Range(0, dds.Mips.Count).First(i => Math.Max(dds.MipWidth(i), dds.MipHeight(i)) <= _maxSize || i == dds.Mips.Count - 1);
+        int w = dds.MipWidth(m), h = dds.MipHeight(m);
+        double bright = _cfg.Num("vegetation", "card_brightness"); int dilate = (int)_cfg.Num("vegetation", "card_dilate_px");
+        var mips = Cached($"card|{ddsName}|{_maxSize}|{bright}|{dilate}", path, () =>
+        {
+            var px = dds.Format == Dds.Fmt.BC7 ? Preview.DecodeBc7(dds.Mips[m], w, h) : dds.Decode(m)!;
+            var filled = new bool[w * h];
+            double[] sum = new double[3]; int opaque = 0;
+            for (int i = 0; i < w * h; i++)
+                if (px[i * 4 + 3] >= 128) { filled[i] = true; opaque++; for (int c = 0; c < 3; c++) sum[c] += px[i * 4 + c]; }
+            for (int pass = 0; pass < dilate && opaque > 0; pass++)
+            {
+                var add = new List<(int i, byte r, byte g, byte b)>();
+                for (int y = 0; y < h; y++)
+                    for (int x = 0; x < w; x++)
+                    {
+                        if (filled[y * w + x]) continue;
+                        int n = 0, r = 0, g = 0, b = 0;
+                        for (int dy = -1; dy <= 1; dy++)
+                            for (int dx = -1; dx <= 1; dx++)
+                            {
+                                int xx = x + dx, yy = y + dy;
+                                if (xx < 0 || yy < 0 || xx >= w || yy >= h || !filled[yy * w + xx]) continue;
+                                int k = (yy * w + xx) * 4; r += px[k]; g += px[k + 1]; b += px[k + 2]; n++;
+                            }
+                        if (n > 0) add.Add((y * w + x, (byte)(r / n), (byte)(g / n), (byte)(b / n)));
+                    }
+                if (add.Count == 0) break;
+                foreach (var (i, r, g, b) in add) { px[i * 4] = r; px[i * 4 + 1] = g; px[i * 4 + 2] = b; filled[i] = true; }
+            }
+            for (int i = 0; i < w * h; i++)
+            {
+                if (!filled[i] && opaque > 0) for (int c = 0; c < 3; c++) px[i * 4 + c] = (byte)(sum[c] / opaque);
+                for (int c = 0; c < 3; c++) px[i * 4 + c] = (byte)Math.Clamp(px[i * 4 + c] * bright, 0, 255);
+            }
+            var enc = new BCnEncoder.Encoder.BcEncoder(BCnEncoder.Shared.CompressionFormat.Bc3);
+            enc.OutputOptions.GenerateMipMaps = true;
+            enc.OutputOptions.Quality = BCnEncoder.Encoder.CompressionQuality.Fast;
+            return enc.EncodeToRawBytes(px, w, h, BCnEncoder.Encoder.PixelFormat.Rgba32).ToList();
+        });
+        Log.Add($"{ddsName}: card texture {w}x{h}, colour spread {dilate} px into transparent texels, x{bright:0.##} brightness");
+        return Texture(ddsName + "_card", Dds.Fmt.BC3, false, w, h, mips);
+    }
+
+    /// The billboard normal strip (<template>_lod_tn) of a card texture, as a BC5 texture package; null if the template has none.
+    public string? CardNormal(string cardDds) =>
+        cardDds.EndsWith("_lod_d") && NormalTexture(cardDds[..^1] + "tn", (int)_cfg.Num("dr2_textures", "object_normal_max_size")) is { } n ? n : null;
+
+    /// MIC of M_MasterMaskedSurfaces (masked_mic_template): the colour texture's alpha is the opacity mask.
+    public string MaskedMic(string name, string colourOpacity, string? normal = null)
+    {
+        var path = MicFrom("masked_mic_template", name, colourOpacity,
+            [("masked_mic_base_texture", colourOpacity), ("masked_mic_orm_texture", Orm()), ("masked_mic_normal_texture", normal ?? Normal())]);
+        MaskedMics.Add(path);
+        return path;
+    }
+    public readonly HashSet<string> MaskedMics = new();
+
+    /// Share of texels with alpha below 0.5 in a small mip (BC7 decoded with BCnEncoder); 0 for formats without alpha.
+    public double Transparency(string ddsName)
+    {
+        try
+        {
+            var d = new Dds(Path.Combine(_texDir, ddsName + ".dds"));
+            if (d.Format is Dds.Fmt.BC4 or Dds.Fmt.BC5) return 0;
+            int m = Enumerable.Range(0, d.Mips.Count).First(i => d.MipWidth(i) <= 256 || i == d.Mips.Count - 1);
+            var px = d.Format == Dds.Fmt.BC7 ? Preview.DecodeBc7(d.Mips[m], d.MipWidth(m), d.MipHeight(m)) : d.Decode(m)!;
+            int n = px.Length / 4, t = 0;
+            for (int i = 0; i < n; i++) if (px[i * 4 + 3] < 128) t++;
+            return (double)t / n;
+        }
+        catch (Exception e) when (e is NotSupportedException or InvalidDataException) { return 0; }
+    }
+
+    // ---- class textures ([object_textures]): the flat-colour object sections, edge posts and crowns -------------------------
+
+    /// The stage texture (DDS name) for an object class: the diffuse most used by the object materials (any shader, so
+    /// foliage counts) whose name contains one of the keywords, else the first stage diffuse with one; null if none is usable.
+    public string? ClassDiffuse(IEnumerable<JsonNode> objectMaterials, IReadOnlyList<string> keywords)
+    {
+        if (keywords.Count == 0) return null;
+        bool Match(string n) => keywords.Any(k => n.Contains(k, StringComparison.OrdinalIgnoreCase));
+        var used = new Dictionary<string, int>();
+        foreach (var mat in objectMaterials)
+            foreach (var t in mat["textures"]?.AsArray() ?? [])
+            {
+                if (!t!["parameter"]!.GetValue<string>().StartsWith("TDiffuse")) continue;
+                var r = t["texture"]!.GetValue<string>();
+                var n = Path.ChangeExtension(r[(r.IndexOf('#') + 1)..], null);
+                if (!File.Exists(Path.Combine(_texDir, n + ".dds")) && File.Exists(Path.Combine(_texDir, n + "_slice0.dds"))) n += "_slice0";
+                if (Match(n)) used[n] = used.GetValueOrDefault(n) + 1;
+            }
+        return used.OrderByDescending(kv => kv.Value).ThenBy(kv => kv.Key, StringComparer.Ordinal).Select(kv => kv.Key).FirstOrDefault(Usable)
+               ?? Directory.GetFiles(_texDir, "*.dds").Select(f => Path.GetFileNameWithoutExtension(f))
+                   .Where(n => Match(n) && Regex.IsMatch(n, @"_d\d*(_slice0)?$", RegexOptions.IgnoreCase)).Order(StringComparer.Ordinal).FirstOrDefault(Usable);
+    }
+
+    /// Texture2D for a class texture. M_Simple is opaque and ignores alpha, so a texture with transparent texels (foliage
+    /// cards, cut-out fences) is re-encoded as BC1 with those texels set to the mean opaque colour; BC7 has no decoder
+    /// here and is used as it is.
+    public string ClassTexture(string ddsName)
+    {
+        var dds = new Dds(Path.Combine(_texDir, ddsName + ".dds"));
+        int m = Enumerable.Range(0, dds.Mips.Count).First(i => Math.Max(dds.MipWidth(i), dds.MipHeight(i)) <= _maxSize || i == dds.Mips.Count - 1);
+        if (dds.Decode(m) is not { } px) return Texture(ddsName);
+        int n = px.Length / 4, opaque = 0;
+        var sum = new double[3];
+        for (int i = 0; i < n; i++)
+            if (px[i * 4 + 3] >= 128) { opaque++; for (int c = 0; c < 3; c++) sum[c] += px[i * 4 + c]; }
+        if (opaque == n || opaque == 0) return Texture(ddsName);
+        for (int i = 0; i < n; i++)
+        {
+            if (px[i * 4 + 3] < 128) for (int c = 0; c < 3; c++) px[i * 4 + c] = (byte)(sum[c] / opaque);
+            px[i * 4 + 3] = 255;
+        }
+        Log.Add($"{ddsName}: {100.0 * (n - opaque) / n:0}% transparent texels set to the mean opaque colour");
+        int w = dds.MipWidth(m), h = dds.MipHeight(m);
+        return Texture(ddsName + "_opaque", Dds.Fmt.BC1, false, w, h,
+                       Cached($"opaque|{ddsName}|{_maxSize}", Path.Combine(_texDir, ddsName + ".dds"), () => Dds.Bc1Chain(px, w, h)));
+    }
+
+    public string ClassMic(string diffuse) => Mic("cls_" + diffuse, ClassTexture(diffuse), ObjectNormal(diffuse));
 }
 
 /// Drop-in DR2 textures (v1.8) helpers.
@@ -458,9 +906,10 @@ internal static class DropIn
         {
             var dds = new Dds(f);
             int m = Enumerable.Range(0, dds.Mips.Count).FirstOrDefault(i => dds.MipWidth(i) <= max);
-            var px = dds.Decode(m);
+            var px = dds.Format == Dds.Fmt.BC7 ? AcrRef.Preview.DecodeBc7(dds.Mips[m], dds.MipWidth(m), dds.MipHeight(m)) : dds.Decode(m);
             if (px is null) { Console.WriteLine($"{f}: {dds.Format} not decoded"); continue; }
-            for (int i = 3; i < px.Length; i += 4) px[i] = 255; // DR2 diffuse alpha is specular, not coverage
+            // DR2 diffuse alpha is specular on most textures, coverage on foliage: --alpha keeps it (as a checkerboard-free mask)
+            if (!o.Named.ContainsKey("alpha")) for (int i = 3; i < px.Length; i += 4) px[i] = 255;
             var png = Path.Combine(outDir, Path.GetFileNameWithoutExtension(f) + ".png");
             Dds.WritePng(png, dds.MipWidth(m), dds.MipHeight(m), px);
             double r = 0, g = 0, b = 0;
@@ -472,3 +921,4 @@ internal static class DropIn
         return 0;
     }
 }
+

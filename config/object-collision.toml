@@ -3,10 +3,13 @@
 #
 # ACR simple colliders cannot break or move, so anything DR2 knocks over easily would act as a solid wall.
 # The host (Hafren South) has no bush colliders at all (15188 of its 15326 simple colliders are PM_WallWoodTreeTrunks
-# capsules), and DR2's sSoftVegetation is drive-through, so bushes are skipped as well.
+# capsules), and DR2's sSoftVegetation is drive-through, so bushes are skipped as well. sMediumSoftVegetation and
+# sHardSoftVegetation are bushes too (fin_beech_bush_01_a: a 1.16 m sphere, about 490 per Finland stage; up to 3600
+# on Greece): DR2 lets the car plough through them, an ACR capsule stops it dead, which made the verges feel like
+# walls. They keep their billboard cards.
 
 [skip]
-shape_classes = ["sSoftVegetation", "sSpawnableShakedown"]
+shape_classes = ["sSoftVegetation", "sMediumSoftVegetation", "sHardSoftVegetation", "sSpawnableShakedown"]
 # physparams impulse classes at which DR2 breaks the object (bLightest < bLight < bMedium < bHeavy; bPhantom has
 # no collision response worth keeping)
 breaks_on_impulse = ["bLightest", "bLight", "bPhantom"]
@@ -28,3 +31,11 @@ car_height_max_m = 2.5
 [shapes]
 # cones (trunks, armco ends, traffic cones) become small double-sided mesh colliders with this many segments
 cone_segments = 8
+# v1.12: an unrotated box is clipped to its template's render-mesh bounds + this margin (render/objects.glb), so no box
+# stands where nothing of its object is drawn (vehicle boxes reached past their meshes over open ground). < 0 = off.
+box_mesh_margin_m = 0.1
+# round 3: a tree's capsule collider (DR2: 0.5-1.3 m across) is never wider than the template's real trunk mesh near its base: the
+# farthest foliage_trunk vertex from the centre of the slab trunk_slab_m above the lowest trunk vertex (render/objects.glb), plus this
+# margin. Length and axis stay; the report's tree_collider_radius_cm lists before -> after per template. Remove trunk_slab_m to turn off.
+trunk_slab_m = [0.3, 1.5]
+trunk_collider_margin_m = 0.03

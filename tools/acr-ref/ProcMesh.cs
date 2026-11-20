@@ -17,7 +17,8 @@ internal static class ProcMesh
 {
     internal sealed class Section
     {
-        public List<Vector3> Pos = new(), Nrm = new(), Tan = new();   // Tan optional (derived from the normal if empty)
+        public List<Vector3> Pos = new(), Nrm = new(), Tan = new();   // Tan optional (UV-derived when empty)
+        public List<bool> FlipTanY = new(); // optional; false when absent
         public List<Vector2> Uv = new();
         public List<Vector2> Uv1 = new(), Uv2 = new(), Uv3 = new();  // optional: written when filled for every vertex
         public List<uint> Idx = new();
@@ -98,7 +99,8 @@ internal static class ProcMesh
                                     {
                                         if (t.Zero) { if (t.Index == 0) s.Tan.Add(Vector3.Zero); continue; }
                                         if (t.Index == 0) { s.Tan.Add(V3(d, p)); p += 24; }
-                                        else throw new InvalidDataException("bFlipTangentY set");
+                                        else if (t.Index == 1) { while (s.FlipTanY.Count < v) s.FlipTanY.Add(false); s.FlipTanY.Add(d[p++] != 0); }
+                                        else throw new InvalidDataException($"ProcMeshTangent slot {t.Index}");
                                     }
                                     break;
                                 case 3: s.Color = BitConverter.ToUInt32(d, p); p += 4; break;
@@ -108,6 +110,7 @@ internal static class ProcMesh
                                 default: throw new InvalidDataException($"ProcMeshVertex slot {f.Index}");
                             }
                         }
+                        if (s.FlipTanY.Count > 0 && s.FlipTanY.Count < v + 1) s.FlipTanY.Add(false);
                         foreach (var list in extra) if (list.Count > 0 && list.Count < v + 1) list.Add(Vector2.Zero);
                     }
                     break;
@@ -129,10 +132,12 @@ internal static class ProcMesh
 
     // ---- writing ----
 
-    public static void WriteSection(BinaryWriter w, Section s)
+    public static void WriteSection(BinaryWriter w, Section s, bool uvTangents = true)
     {
         if (s.Pos.Count != s.Nrm.Count || s.Pos.Count != s.Uv.Count) throw new ArgumentException("vertex attribute counts differ");
         if (new[] { s.Uv1, s.Uv2, s.Uv3 }.Any(l => l.Count != 0 && l.Count != s.Pos.Count)) throw new ArgumentException("UV1..UV3 must be empty or one per vertex");
+        ValidateTangents(s);
+        if (uvTangents) EnsureUvTangents(s);
         Unv.WriteHeader(w, [new(0, s.Pos.Count == 0), new(1, s.Idx.Count == 0), new(2, false), new(3, !s.Collision), new(4, false)]);
         if (s.Pos.Count > 0)
         {
@@ -141,15 +146,17 @@ internal static class ProcMesh
             {
                 var n = s.Nrm[i];
                 var tangent = s.Tan.Count == s.Pos.Count ? s.Tan[i]
-                    : Vector3.Normalize(Math.Abs(n.Z) < 0.9f ? Vector3.Cross(Vector3.UnitZ, n) : Vector3.Cross(Vector3.UnitX, n));
+                    : NormalTangent(n);
                 bool uvZero = s.Uv[i] == Vector2.Zero;
                 Vector2 Extra(List<Vector2> l) => l.Count == s.Pos.Count ? l[i] : Vector2.Zero;
                 Vector2 u1 = Extra(s.Uv1), u2 = Extra(s.Uv2), u3 = Extra(s.Uv3);
                 Unv.WriteHeader(w, [new(0, false), new(1, false), new(2, false), new(3, false), new(4, uvZero),
                                     new(5, u1 == Vector2.Zero), new(6, u2 == Vector2.Zero), new(7, u3 == Vector2.Zero)]);
                 W3(w, s.Pos[i]); W3(w, n);
-                Unv.WriteHeader(w, [new(0, false), new(1, true)]);
+                bool flip = s.FlipTanY.Count == s.Pos.Count && s.FlipTanY[i];
+                Unv.WriteHeader(w, [new(0, false), new(1, !flip)]);
                 W3(w, tangent);
+                if (flip) w.Write((byte)1); // unversioned nonzero bool: uint8 payload (not a tagged-property bool)
                 w.Write(s.Color);
                 foreach (var uv in new[] { s.Uv[i], u1, u2, u3 })
                     if (uv != Vector2.Zero) { w.Write((double)uv.X); w.Write((double)uv.Y); }
@@ -160,6 +167,60 @@ internal static class ProcMesh
         W3(w, mn); W3(w, mx); w.Write((byte)1);
         if (s.Collision) w.Write((byte)1);
         w.Write((byte)1);                                          // bSectionVisible
+    }
+
+    static bool Usable(Vector3 v) => float.IsFinite(v.LengthSquared()) && v.LengthSquared() > 1e-20f;
+    static Vector3 UnitNormal(Vector3 n) => Usable(n) ? Vector3.Normalize(n) : Vector3.UnitZ;
+    internal static Vector3 NormalTangent(Vector3 n)
+    {
+        n = UnitNormal(n);
+        return Vector3.Normalize(Math.Abs(n.Z) < 0.9f ? Vector3.Cross(Vector3.UnitZ, n) : Vector3.Cross(Vector3.UnitX, n));
+    }
+
+    static void ValidateTangents(Section s)
+    {
+        if (s.Tan.Count != 0 && s.Tan.Count != s.Pos.Count) throw new ArgumentException("partial tangent array");
+        if (s.FlipTanY.Count != 0 && (s.FlipTanY.Count != s.Pos.Count || s.Tan.Count != s.Pos.Count))
+            throw new ArgumentException("partial tangent handedness array");
+    }
+
+    /// O(vertices + indices), two Vector3 accumulators, no per-triangle allocations or welding.
+    /// UV/normal seams (including mirrored islands) must already have distinct vertices.
+    internal static void EnsureUvTangents(Section s)
+    {
+        ValidateTangents(s);
+        if (s.Tan.Count != 0 || s.Pos.Count == 0) return; // preserve authored bases
+        int count = s.Pos.Count;
+        if (s.Uv.Count != count || s.Nrm.Count != count) throw new ArgumentException("vertex attribute counts differ");
+        if (s.Idx.Count % 3 != 0) throw new ArgumentException("incomplete triangle");
+        var du = new Vector3[count]; var dv = new Vector3[count];
+        for (int i = 0; i < s.Idx.Count; i += 3)
+        {
+            uint ia = s.Idx[i], ib = s.Idx[i + 1], ic = s.Idx[i + 2];
+            if (ia >= count || ib >= count || ic >= count) throw new ArgumentException("triangle index out of range");
+            int a = (int)ia, b = (int)ib, c = (int)ic;
+            var e1 = s.Pos[b] - s.Pos[a]; var e2 = s.Pos[c] - s.Pos[a];
+            var u1 = s.Uv[b] - s.Uv[a]; var u2 = s.Uv[c] - s.Uv[a];
+            double det = (double)u1.X * u2.Y - (double)u1.Y * u2.X;
+            double scale = Math.Sqrt((double)u1.LengthSquared() * u2.LengthSquared());
+            if (!double.IsFinite(det) || Math.Abs(det) <= Math.Max(1e-30, scale * 1e-8)) continue;
+            var t = (e1 * u2.Y - e2 * u1.Y) * (float)(1 / det);
+            var v = (e2 * u1.X - e1 * u2.X) * (float)(1 / det);
+            if (!Usable(t) || !Usable(v) || !Usable(Vector3.Cross(e1, e2))) continue;
+            du[a] += t; du[b] += t; du[c] += t;
+            dv[a] += v; dv[b] += v; dv[c] += v;
+        }
+        s.Tan = new List<Vector3>(count); s.FlipTanY = new List<bool>(count);
+        for (int i = 0; i < count; i++)
+        {
+            var n = UnitNormal(s.Nrm[i]);
+            var t = du[i] - n * Vector3.Dot(n, du[i]); // Gram-Schmidt
+            if (!Usable(t)) t = Vector3.Cross(dv[i], n); // retain V if U cancels
+            t = Usable(t) ? Vector3.Normalize(t) : NormalTangent(n);
+            s.Tan.Add(t);
+            // DirectX green points toward -V; UE B = cross(N,T) * (flip ? -1 : +1).
+            s.FlipTanY.Add(Usable(dv[i]) && Vector3.Dot(Vector3.Cross(n, t), dv[i]) > 0);
+        }
     }
 
     static void W3(BinaryWriter w, Vector3 v) { w.Write((double)v.X); w.Write((double)v.Y); w.Write((double)v.Z); }
@@ -174,7 +235,7 @@ internal static class ProcMesh
 
     /// Rebuilds the component export: keeps its body setup and attach parent, replaces the sections and bounds,
     /// makes it absolute (vertices are world UE cm), visible in game, with optional per-section material imports.
-    public static byte[] BuildComponent(Component c, IReadOnlyList<Section> sections, IReadOnlyList<int>? materials)
+    public static byte[] BuildComponent(Component c, IReadOnlyList<Section> sections, IReadOnlyList<int>? materials, bool uvTangents = true)
     {
         var d = c.Data;
         foreach (var k in c.Slots.Keys)
@@ -185,7 +246,7 @@ internal static class ProcMesh
         void Keep(int k) { if (c.Slots.TryGetValue(k, out var s)) { slots.Add(new(k, s.zero)); if (!s.zero) body.Add(w => w.Write(d, s.at, s.end - s.at)); } }
 
         Keep(2);
-        slots.Add(new(3, false)); body.Add(w => { w.Write(sections.Count); foreach (var s in sections) WriteSection(w, s); });
+        slots.Add(new(3, false)); body.Add(w => { w.Write(sections.Count); foreach (var s in sections) WriteSection(w, s, uvTangents); });
         var (mn, mx) = Bounds(sections.SelectMany(s => s.Pos));
         slots.Add(new(5, false)); body.Add(w =>
         {

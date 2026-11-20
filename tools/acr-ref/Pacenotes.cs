@@ -259,7 +259,7 @@ internal static class Pacenotes
     // ---------------- DR2 -> ACR generation ----------------
 
     public sealed record Dr2Token(int Call, int Subcall, double GateDistance, string Kind, string? Direction, string? Severity,
-                                  double? DistanceCall, string[] Modifiers, double DistanceM = 0, int Angle = 0, int DelayMs = 0);
+                                  double? DistanceCall, string[] Modifiers, double DistanceM = 0, int Angle = 0, int DelayMs = 0, int Type = 0);
 
     public static List<Dr2Token> LoadTokens(string stageJson)
     {
@@ -269,7 +269,8 @@ internal static class Pacenotes
             t["kind"]!.GetValue<string>(), t["direction"]?.GetValue<string>(), t["severity"]?.GetValue<string>(),
             t["distance_call_m"]?.GetValue<double>(),
             t["modifiers"]?.AsArray().Select(m => m!.GetValue<string>()).ToArray() ?? [],
-            t["distance_m"]?.GetValue<double>() ?? 0, t["angle"]?.GetValue<int>() ?? 0, t["delay_ms"]?.GetValue<int>() ?? 0)).ToList();
+            t["distance_m"]?.GetValue<double>() ?? 0, t["angle"]?.GetValue<int>() ?? 0, t["delay_ms"]?.GetValue<int>() ?? 0,
+            t["type"]?.GetValue<int>() ?? 0)).ToList();
     }
 
     /// Median min radius (m) per severity on the host stage (pacenote-survey on Hafren South): the yardstick for the
@@ -526,6 +527,7 @@ internal static class Pacenotes
         var placed = new List<Placed>();
         int localised = 0, fallback = 0, dirAgree = 0, cornerTokens = 0, mappedTokens = 0, droppedAfterFinish = 0;
         string? pendingConj = null;
+        (int call, string tok)? pendingCall = null;
         double finishRead = double.NaN;
 
         // DR2 spoken distances (>= min_dr2_m) become "wishes" on the gap between the corner before and the corner after them
@@ -550,6 +552,8 @@ internal static class Pacenotes
                                          Angle = t.Angle, Read = read, Want = t.Direction == "right" ? 1 : -1,
                                          PrevInSeq = lastSeq, WishBefore = pendingGap };
                     pendingConj = null; pendingGap = null; lastSeq = p;
+                    if (pendingCall is { } pc && pc.call == t.Call) p.Tokens.Add(pc.tok);   // "crest, left 4" in one phrase
+                    pendingCall = null;
                     foreach (var mod in t.Modifiers)
                         if (Map("modifiers", mod) is { } mt) p.Tokens.Add(mt); else Unmapped($"modifier {mod}");
                     placed.Add(p);
@@ -578,7 +582,14 @@ internal static class Pacenotes
                     if (Map("finish", "finish") is not null) { finishRead = read; mappedTokens++; trailingWish = pendingGap; pendingGap = null; } else Unmapped("finish");
                     break;
                 default:
-                    Unmapped($"kind {t.Kind}");
+                    // [calls] type<N> (e.g. 9 -> OverCrest, 7 -> IntoDip): said with the corner of the same DR2 phrase,
+                    // appended to it (or to the next corner of that phrase); a phrase without a corner stays unmapped
+                    if (t.Kind == "unknown" && Map("calls", $"type{t.Type}") is { } ct)
+                    {
+                        if (lastSeq is not null && lastSeq.Call == t.Call) { lastSeq.Tokens.Add(ct); mappedTokens++; }
+                        else { pendingCall = (t.Call, ct); mappedTokens++; }
+                    }
+                    else Unmapped($"kind {t.Kind}");
                     break;
             }
         }

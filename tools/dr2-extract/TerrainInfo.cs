@@ -21,6 +21,18 @@ internal static class TerrainInfo
             return 0;
         }
 
+        if (args.Contains("--stats-wsm"))
+        {
+            StatsWsm(pssg);
+            return 0;
+        }
+
+        if (Program.Option(args, "--near") is { } near)
+        {
+            Near(pssg, near);
+            return 0;
+        }
+
         var nodeFilter = Program.Option(args, "--node") ?? "SHADOWCASTING_";
         var sampleCount = int.Parse(Program.Option(args, "--vertices") ?? "12");
 
@@ -101,6 +113,119 @@ internal static class TerrainInfo
         }
 
         return 0;
+    }
+
+    /// <summary>
+    /// <c>--near x,z,r</c>: every render node with triangles whose centroid is within r m of (x, z) in plan, by node-name
+    /// prefix and shader group, with the triangle count (which tier of tracksplit.pssg draws a given spot).
+    /// </summary>
+    private static void Near(PssgFile pssg, string spec)
+    {
+        var p = spec.Split(',').Select(s => float.Parse(s, System.Globalization.CultureInfo.InvariantCulture)).ToArray();
+        float x = p[0], z = p[1], r2 = p[2] * p[2];
+        var counts = new SortedDictionary<string, int>();
+        var library = pssg.Elements<PssgLibrary>().First(l => l.Type == "NODE");
+        void Walk(PssgNode node, System.Numerics.Matrix4x4 parent)
+        {
+            var world = node.ChildElements.OfType<PssgTransform>().FirstOrDefault()?.Transform * parent ?? parent;
+            if (node is PssgVisibleRenderNode v)
+                foreach (var s in v.RenderInstances.OfType<PssgRenderStreamInstance>())
+                {
+                    RdsReader rds;
+                    try { rds = new RdsReader(s.GetRenderDataSource()); } catch (Exception) { continue; }
+                    int n = 0;
+                    foreach (var (a, b, c) in rds.Triangles())
+                    {
+                        var g = (System.Numerics.Vector3.Transform(rds.Position(a), world) + System.Numerics.Vector3.Transform(rds.Position(b), world) + System.Numerics.Vector3.Transform(rds.Position(c), world)) / 3;
+                        if ((g.X - x) * (g.X - x) + (g.Z - z) * (g.Z - z) <= r2) n++;
+                    }
+                    if (n == 0) continue;
+                    var prefix = Environment.GetEnvironmentVariable("DR2_NEAR_IDS") is null
+                        ? System.Text.RegularExpressions.Regex.Replace(node.Id, @"\d+(_\d+)*$", "*") : node.Id;
+                    var key = $"{prefix} {s.TryGetShaderInstance()?.ShaderGroup.TrimStart('#')}";
+                    counts[key] = counts.GetValueOrDefault(key) + n;
+                }
+            foreach (var ch in node.ChildElements.OfType<PssgNode>()) Walk(ch, world);
+        }
+        foreach (var root in library.ChildElements.OfType<PssgNode>()) Walk(root, System.Numerics.Matrix4x4.Identity);
+        foreach (var (k, n) in counts) Console.WriteLine($"{n,8} {k}");
+    }
+
+    /// <summary>
+    /// Statistics of the non-array terrain shaders (terrain_road, terrain_wsm_*, terrain_rockbank) over every
+    /// SHADOWCASTING_ node, per shader group: each UV channel's scale (sqrt(UV area / true area), median and spread),
+    /// value range and share inside 0..1, and per-byte histograms of the vertex colour.
+    /// </summary>
+    private static void StatsWsm(PssgFile pssg)
+    {
+        var groups = new SortedDictionary<string, (long Tris, List<double>[] Scale, System.Numerics.Vector2[] Min, System.Numerics.Vector2[] Max, long[] In01, long Verts, int[][] Col)>();
+        string[] names = ["ST0.xy", "ST0.zw", "ST1.xy", "ST1.zw"];
+        var layouts = new HashSet<string>();
+        var library = pssg.Elements<PssgLibrary>().First(x => x.Type == "NODE");
+        foreach (var node in library.Elements<PssgVisibleRenderNode>().Where(n => n.Id.Contains("SHADOWCASTING_", StringComparison.Ordinal)))
+        {
+            foreach (var stream in node.RenderInstances.OfType<PssgRenderStreamInstance>())
+            {
+                var group = stream.TryGetShaderInstance()?.ShaderGroup.TrimStart('#') ?? "?";
+                if (group == "terrain_array.fx") continue;
+                if (!groups.TryGetValue(group, out var g))
+                {
+                    g = (0, names.Select(_ => new List<double>()).ToArray(), names.Select(_ => new System.Numerics.Vector2(float.MaxValue)).ToArray(),
+                        names.Select(_ => new System.Numerics.Vector2(float.MinValue)).ToArray(), new long[4], 0, Enumerable.Range(0, 4).Select(_ => new int[256]).ToArray());
+                }
+
+                var rds = new RdsReader(stream.GetRenderDataSource());
+                var layout = string.Join(", ", rds.Layout.Select(l => $"{l.RenderType}:{l.DataType}"));
+                if (layouts.Add($"{group}|{layout}")) Console.WriteLine($"{group} layout: {layout}");
+                var stCount = rds.Layout.Count(l => l.RenderType == "ST");
+                System.Numerics.Vector2 Uv(uint v, int ch) { var r = rds.Raw("ST", ch / 2, v); return ch % 2 == 0 ? new(r.X, r.Y) : new(r.Z, r.W); }
+                var seen = new HashSet<uint>();
+                foreach (var (a, b, c) in rds.Triangles())
+                {
+                    g.Tris++;
+                    foreach (var v in new[] { a, b, c })
+                    {
+                        if (!seen.Add(v)) continue;
+                        g.Verts++;
+                        var col = rds.Raw("Color", 0, v);
+                        g.Col[0][(int)col.X]++; g.Col[1][(int)col.Y]++; g.Col[2][(int)col.Z]++; g.Col[3][(int)col.W]++;
+                        for (var ch = 0; ch < 2 * stCount; ch++)
+                        {
+                            var u = Uv(v, ch);
+                            g.Min[ch] = System.Numerics.Vector2.Min(g.Min[ch], u); g.Max[ch] = System.Numerics.Vector2.Max(g.Max[ch], u);
+                            if (u.X >= 0 && u.X <= 1 && u.Y >= 0 && u.Y <= 1) g.In01[ch]++;
+                        }
+                    }
+
+                    if (g.Tris % 7 != 0) continue;
+                    var (pa, pb, pc) = (rds.Position(a), rds.Position(b), rds.Position(c));
+                    var area = System.Numerics.Vector3.Cross(pb - pa, pc - pa).Length() / 2;
+                    if (area < 0.05f) continue;
+                    for (var ch = 0; ch < 2 * stCount; ch++)
+                    {
+                        var (e1, e2) = (Uv(b, ch) - Uv(a, ch), Uv(c, ch) - Uv(a, ch));
+                        if (g.Scale[ch].Count < 200_000) g.Scale[ch].Add(Math.Sqrt(Math.Abs(e1.X * e2.Y - e1.Y * e2.X) / 2 / area));
+                    }
+                }
+
+                groups[group] = g;
+            }
+        }
+
+        foreach (var (group, g) in groups)
+        {
+            Console.WriteLine($"{group}: {g.Tris} triangles, {g.Verts} vertices");
+            for (var ch = 0; ch < 4; ch++)
+            {
+                var s = g.Scale[ch].Order().ToList();
+                double P(double q) => s.Count == 0 ? double.NaN : s[(int)(q * (s.Count - 1))];
+                Console.WriteLine($"  {names[ch]}: per metre p10 {P(0.1):0.####} median {P(0.5):0.####} p90 {P(0.9):0.####}; range {g.Min[ch]} .. {g.Max[ch]}; inside 0..1 {100.0 * g.In01[ch] / g.Verts:0.#}%");
+            }
+
+            for (var b = 0; b < 4; b++)
+                Console.WriteLine($"  colour byte{b}: {g.Col[b].Count(n => n > 0)} distinct; " +
+                                  string.Join(" ", g.Col[b].Select((n, i) => (n, i)).Where(x => x.n > 0).OrderByDescending(x => x.n).Take(12).Select(x => $"{x.i}:{x.n}")));
+        }
     }
 
     /// <summary>Statistics of the packed terrain_array vertex data over every SHADOWCASTING_ node.</summary>

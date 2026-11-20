@@ -49,7 +49,11 @@ internal sealed class StageSpec
         public string? StageName;
         public float? Length;              // km, menu only (the HUD uses the route spline)
         public List<string>? DataLayers;   // DT_DataLayers rows; default: the template's
+        public string? Stage;              // DR2 stage id of this variant's route (name, sectors, elevation); null = the spec's Stage
     }
+
+    /// The DR2 stage a variant's route comes from (its own Stage, else the spec's).
+    public string? StageOf(VariantSpec v) => v.Stage ?? Stage;
 
     /// Loads a spec. Stage display names are not stored in the (committed) specs: a ported stage's empty Track.Name /
     /// Variants[].Name / StageName are filled from the user's own DR2 localisation, i.e. the `name` of work/ir/<Stage>/stage.json
@@ -64,17 +68,23 @@ internal sealed class StageSpec
     public void ResolveNames(string irRoot)
     {
         if (Stage is null || (Track.Name.Length > 0 && Variants.All(v => v.Name.Length > 0))) return;
-        var json = Path.Combine(irRoot, Stage, "stage.json");
-        if (!File.Exists(json)) throw new FileNotFoundException($"{Id}: stage names come from the DR2 localisation in {json} (run scripts\\prepare-stage-data.ps1)");
-        var name = ((string?)Newtonsoft.Json.Linq.JObject.Parse(File.ReadAllText(json))["name"])?.Trim();
-        if (string.IsNullOrEmpty(name)) throw new InvalidDataException($"{json}: no stage name (DR2 language_eng.lng has no lng_<location>_route_<n> entry)");
+        string NameOf(string stage)
+        {
+            var json = Path.Combine(irRoot, stage, "stage.json");
+            if (!File.Exists(json)) throw new FileNotFoundException($"{Id}: stage names come from the DR2 localisation in {json} (run scripts\\prepare-stage-data.ps1)");
+            var n = ((string?)Newtonsoft.Json.Linq.JObject.Parse(File.ReadAllText(json))["name"])?.Trim();
+            if (string.IsNullOrEmpty(n)) throw new InvalidDataException($"{json}: no stage name (DR2 language_eng.lng has no lng_<location>_route_<n> entry)");
+            return n;
+        }
+        var name = NameOf(Stage);
         // track card: the stage name without the Forward / Reverse / Sprint suffix (the location already shows the country)
         if (Track.Name.Length == 0)
             Track.Name = System.Text.RegularExpressions.Regex.Replace(System.Text.RegularExpressions.Regex.Replace(name, @"\s+(Forward|Reverse)$", ""), @"\s+Sprint$", "");
         foreach (var v in Variants)
         {
-            if (v.Name.Length == 0) v.Name = name;
-            if (string.IsNullOrEmpty(v.StageName)) v.StageName = name;
+            var vn = StageOf(v) is { } st && st != Stage ? NameOf(st) : name;
+            if (v.Name.Length == 0) v.Name = vn;
+            if (string.IsNullOrEmpty(v.StageName)) v.StageName = vn;
         }
     }
 }
@@ -246,12 +256,21 @@ internal static class Registry
             }
             if (v.DataLayers is { } dl)
             {
-                // FTrackVariantDataLayers {Common: FDataLayersList {Value: TArray<FDBReference>}, RaceEventTypes: TMap}
+                // FTrackVariantDataLayers {Common: FDataLayersList {Value: TSet<FDBReference>}, RaceEventTypes: TMap}: the template's
+                // bytes with only the Common.Value set replaced (its headers and RaceEventTypes kept as they are)
+                var tb = r.Get(I("DBTrackVariant", "DataLayers")).Bytes;
+                int p = 0;
+                var outer = AcrRef.Unv.ReadHeader(tb, ref p);
+                if (outer.FirstOrDefault(x => !x.Zero).Index != 0) throw new InvalidDataException($"{v.Template}: DataLayers does not start with Common");
+                var inner = AcrRef.Unv.ReadHeader(tb, ref p);
+                if (inner.FirstOrDefault(x => !x.Zero).Index != 0) throw new InvalidDataException($"{v.Template}: DataLayers.Common does not start with Value");
+                int arrayAt = p;
+                vars.ReadDbRefs(tb[arrayAt..], true, out int arrayLen);
                 using var ms = new MemoryStream();
                 using var w = new BinaryWriter(ms);
-                AcrRef.Unv.WriteHeader(w, [new(0, false)]);
-                AcrRef.Unv.WriteHeader(w, [new(0, false)]);
-                w.Write(vars.DbRefs(dl.Select(x => ("DataLayers", x)), false));
+                w.Write(tb, 0, arrayAt);
+                w.Write(vars.DbRefs(dl.Select(x => ("DataLayers", x)), true));
+                w.Write(tb, arrayAt + arrayLen, tb.Length - arrayAt - arrayLen);
                 r.Set(I("DBTrackVariant", "DataLayers"), ms.ToArray());
             }
             vars.Rows.Add(r);
@@ -267,7 +286,6 @@ internal static class Registry
         int I(string type, string prop) => schema.IndexOf(type, prop);
         var m = s.Menu!;
         if (s.Stage is null || irRoot is null) throw new InvalidOperationException($"{s.Id}: Menu needs Stage and --ir-root");
-        var route = new StageRoute(Path.Combine(irRoot, s.Stage, "stage.json"));
         var vars = t["TracksVariants"];
         var tracks = t["Tracks"];
         if (m.Images)
@@ -292,10 +310,12 @@ internal static class Registry
         foreach (var v in s.Variants)
         {
             var r = vars[v.Row];
+            var route = new StageRoute(Path.Combine(irRoot, s.StageOf(v)!, "stage.json"));
+            // a reverse variant gets its own variant map / elevation images (drawn from its route); the track map stays shared
             if (m.Images)
             {
-                r.Set(I("DBTrackVariant", "MapSmall"), vars.DbRef("TracksTextures", Menu.TextureRow(s.Id, "MapSmall")));
-                r.Set(I("DBTrackVariant", "ElevationMap"), vars.DbRef("TracksTextures", Menu.TextureRow(s.Id, "Elevation")));
+                r.Set(I("DBTrackVariant", "MapSmall"), vars.DbRef("TracksTextures", Menu.TextureRow(s.Id, Menu.VariantKind(s, v, "MapSmall"))));
+                r.Set(I("DBTrackVariant", "ElevationMap"), vars.DbRef("TracksTextures", Menu.TextureRow(s.Id, Menu.VariantKind(s, v, "Elevation"))));
                 if (m.Art is not null)
                 {
                     r.Set(I("DBTrackVariant", "VariantImage"), vars.DbRef("TracksTextures", Menu.TextureRow(s.Id, "Banner")));

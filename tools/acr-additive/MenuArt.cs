@@ -193,9 +193,10 @@ internal static class MenuArt
         return c;
     }
 
-    public static Canvas VariantMap(StageRoute r, int size = 800)
+    /// <paramref name="frame"/>: the route the track map is framed on (a reverse variant is drawn over the forward route's track map).
+    public static Canvas VariantMap(StageRoute r, int size = 800, StageRoute? frame = null)
     {
-        var f = Frame(r, size, 60);
+        var f = Frame(frame ?? r, size, 60);
         var c = new Canvas(size, size);
         var pts = r.Points.Select(p => f(p.x, p.z)).ToList();
         c.Stroke(pts, 8.5, Red);

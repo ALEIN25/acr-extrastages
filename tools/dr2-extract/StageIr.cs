@@ -39,18 +39,27 @@ internal static partial class StageIr
     [GeneratedRegex(@"^(?<loc>[a-z0-9_]+)_route_(?<route>\d+)$")]
     private static partial Regex StageId();
 
-    private sealed record Options(string OutRoot, float Corridor, SurfaceMap SurfaceMap, bool Render, GroundBakeOptions? Bake);
+    // Also: other routes of the same location (a stage's reverse / sections) whose road the ground, objects and bake must cover too
+    private sealed record Options(string OutRoot, float Corridor, SurfaceMap SurfaceMap, bool Render, GroundBakeOptions? Bake, string[] Also,
+        float OrnamentCorridor, string OrnamentFilter, bool Ornaments, bool Trees, float TreeCorridor, bool TreeFarLod);
 
     public static async Task<int> Run(string[] args)
     {
         var root = Program.Option(args, "--dr2") ?? Dr2Install.DefaultRoot;
         var outRoot = Program.Option(args, "--out") ?? Path.Combine("work", "ir");
         var cache = Program.Option(args, "--cache") ?? Path.Combine("work", "dr2", "cache");
-        var corridorM = float.Parse(Program.Option(args, "--corridor") ?? "250", CultureInfo.InvariantCulture);
+        // 400 m: DR2's distant ring leaves a larger hole than 250 m around parts of some routes (Wales 01 r2 near the
+        // finish), which left an open band between the drawn ground and the vista
+        var corridorM = float.Parse(Program.Option(args, "--corridor") ?? "400", CultureInfo.InvariantCulture);
         var options = new Options(outRoot, corridorM,
             SurfaceMap.Load(Program.Option(args, "--surface-map") ?? Path.Combine("config", "surface-map.toml")),
             args.Contains("--render"),
-            args.Contains("--bake-ground") ? GroundBakeOptions.Parse(args, corridorM) : null);
+            args.Contains("--bake-ground") ? GroundBakeOptions.Parse(args, corridorM) : null,
+            (Program.Option(args, "--also") ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
+            float.Parse(Program.Option(args, "--ornament-corridor") ?? "60", CultureInfo.InvariantCulture),
+            Program.Option(args, "--ornament-filter") ?? "^rock",
+            !args.Contains("--no-ornaments"), args.Contains("--trees"),
+            float.Parse(Program.Option(args, "--tree-corridor") ?? "150", CultureInfo.InvariantCulture), args.Contains("--tree-far-lod"));
         var install = await Dr2Install.OpenAsync(root, cache);
 
         if (args.Contains("--all"))
@@ -146,6 +155,8 @@ internal static partial class StageIr
         return md.ToString();
     }
 
+    private static List<Vector3> Line(ProgressTrack progress) => progress.Gates.Select(g => g.Crossing).ToList();
+
     private static float Median(IEnumerable<float> values)
     {
         var v = values.Order().ToList();
@@ -189,8 +200,34 @@ internal static partial class StageIr
             File.Delete(jpk);
         }
 
-        var inCorridor = new RouteCorridor(progress.Gates.Select(g => g.Crossing).ToList(), corridor);
-        var kept = ground.Cells.SelectMany(c => c.Triangles).Where(t => inCorridor.Contains(t.Centroid)).ToList();
+        var kept = ground.Cells.SelectMany(c => c.Triangles).Where(t => new RouteCorridor(Line(progress), corridor).Contains(t.Centroid)).ToList();
+        // --also: the other routes' roads (a reverse whose start / finish lines lie off this route, sections). Each route's
+        // physics ground (track.jpk) fills only its own corridor where the routes before it have none, so nothing is doubled.
+        var lines = new List<IReadOnlyList<Vector3>> { Line(progress) };
+        foreach (var also in options.Also)
+        {
+            var m = StageId().Match(also);
+            if (!m.Success || m.Groups["loc"].Value != location) throw new ArgumentException($"--also {also}: not a route of {location}");
+            var other = st with { Route = int.Parse(m.Groups["route"].Value, CultureInfo.InvariantCulture) };
+            var otherLine = Line(ProgressTrack.Load(await install.FetchAsync($"{other.RouteDir}/progress_track.xml")));
+            var before = new RouteCorridor(lines, corridor);
+            var mine = new RouteCorridor(otherLine, corridor);
+            var otherJpk = await install.FetchAsync($"{other.RouteDir}/track.jpk", temporary: true);
+            try
+            {
+                var add = Dr2Ground.ReadJpk(otherJpk).Cells.SelectMany(c => c.Triangles).Where(t => mine.Contains(t.Centroid) && !before.Contains(t.Centroid)).ToList();
+                kept.AddRange(add);
+                Console.WriteLine($"--also {also}: {add.Count} physics ground triangles beyond this route's corridor");
+            }
+            finally
+            {
+                File.Delete(otherJpk);
+            }
+
+            lines.Add(otherLine);
+        }
+
+        var inCorridor = new RouteCorridor(lines, corridor);
         var mapping = surfaceMap.Resolve(kept.Select(t => t.Material));
         Directory.CreateDirectory(outDir);
         var stats = GroundGltf.Write(kept, Path.Combine(outDir, "collision.glb"));
@@ -206,12 +243,14 @@ internal static partial class StageIr
             Console.WriteLine("exporting terrain render mesh (tracksplit.pssg)...");
             var pssg = PssgCommands.Open(await install.FetchAsync($"{locDir}/tracksplit.pssg"));
             // tracksplit.pssg tiers: SHADOWCASTING_i_j = full-detail terrain, DECAL_i_j = road decals over it,
-            // LOW_i_j = low LOD of the same area, NONLOD_i_j = distant vista ring.
+            // LOW_i_j = low LOD of the same area, NONLOD_i_j = distant vista ring. Some locations (Finland, Scotland)
+            // put part of the full-detail terrain in HIGH_i_j tiles instead (no shadow casting): other areas, same tier.
             foreach (var (file, kind, prefix, crop) in new[]
                      {
-                         ("terrain", "terrain_detail", "SHADOWCASTING_", true),
+                         ("terrain", "terrain_detail", "SHADOWCASTING_|HIGH_", true),
                          ("terrain_decals", "terrain_decals", "DECAL_", true),
-                         ("terrain_low", "terrain_low_lod", "LOW_", true),
+                         // the whole low LOD (small): acr-ref draws it as the fill between the detail terrain and the vista ring
+                         ("terrain_low", "terrain_low_lod", "LOW_", false),
                          ("vista", "vista", "NONLOD_", false),
                      })
             {
@@ -236,12 +275,35 @@ internal static partial class StageIr
             }
         }
 
+        // Ground-cover prototypes have their own materials, absent from tracksplit/objects. Export separately so
+        // stage-textures can resolve their diffuse/opacity maps. grass.grs density/placement is still undecoded.
+        var coverSource = $"{locDir}/ground_cover.pssg";
+        if (options.Render && install.Exists(coverSource))
+        {
+            var cover = PssgCommands.Open(await install.FetchAsync(coverSource));
+            var coverGlb = Path.Combine(outDir, "render", "ground_cover.glb");
+            var coverResult = PssgMeshExport.Export(cover, coverGlb, null);
+            File.WriteAllText(Path.ChangeExtension(coverGlb, ".materials.json"), JsonSerializer.Serialize(coverResult.Materials, Json.Options));
+            Console.WriteLine($"ground cover source: {coverSource}, {coverResult.Materials.Count} materials, {coverResult.Triangles} prototype triangles (grass.grs not decoded)");
+        }
+
+        // Lakes and rivers (niwater.pssg, water_v3_river.fx): flat planes for the whole location, exported whole.
+        var waterSource = $"{locDir}/niwater.pssg";
+        if (options.Render && install.Exists(waterSource))
+        {
+            var water = PssgCommands.Open(await install.FetchAsync(waterSource));
+            var waterGlb = Path.Combine(outDir, "render", "water.glb");
+            var waterResult = PssgMeshExport.Export(water, waterGlb, null);
+            File.WriteAllText(Path.ChangeExtension(waterGlb, ".materials.json"), JsonSerializer.Serialize(waterResult.Materials, Json.Options));
+            Console.WriteLine($"water source: {waterSource}, {waterResult.Triangles} triangles");
+        }
+
         object? groundBake = null;
         if (options.Bake is not null)
         {
             try
             {
-                groundBake = await TerrainBake.Run(install, st, progress, outDir, options.Bake);
+                groundBake = await TerrainBake.Run(install, st, progress, outDir, options.Bake, lines);
             }
             catch (Exception ex) when (ex is InvalidDataException or NotSupportedException)
             {
@@ -257,6 +319,22 @@ internal static partial class StageIr
 
         var objects = await BuildObjects(install, st, inCorridor, options, outDir, ground.Cells);
         renderTriangles += objects?.RenderTriangles ?? 0;
+
+        OrnamentsResult? ornaments = null;
+        if (options.Render && options.Ornaments)
+        {
+            var routes = new[] { st }.Concat(options.Also.Select(a => st with { Route = int.Parse(StageId().Match(a).Groups["route"].Value, CultureInfo.InvariantCulture) }));
+            ornaments = await BuildOrnaments(install, st, options, outDir, lines, routes, objects?.TemplateIds ?? []);
+            renderTriangles += ornaments?.RenderTriangles ?? 0;
+        }
+
+        TreesResult? trees = null;
+        if (options.Render && options.Trees)
+        {
+            var treeRoutes = new[] { st }.Concat(options.Also.Select(a => st with { Route = int.Parse(StageId().Match(a).Groups["route"].Value, CultureInfo.InvariantCulture) }));
+            trees = await BuildTrees(install, st, options, outDir, lines.ToList(), treeRoutes);
+            renderTriangles += trees?.RenderTriangles ?? 0;
+        }
 
         // Pacenotes: distanceAlongTrack is metres from the start line (see docs/dr2-formats.md).
         var tokens = codriver?.Calls.SelectMany((c, i) => PacenoteNormalizer.Normalize(c, i)).ToList() ?? [];
@@ -302,6 +380,8 @@ internal static partial class StageIr
                 route_index = route,
             },
             ["length_m"] = Round(finish.Distance - start.Distance, 2),
+            // routes whose road the ground / objects / render / bake also cover (stage-ir --also), e.g. the reverse built into this stage
+            ["corridor_also"] = options.Also,
             ["total_distance_m"] = progress.TotalDistance,
             ["track_type"] = progress.TrackType,
             ["direction"] = progress.Direction,
@@ -417,6 +497,8 @@ internal static partial class StageIr
                 };
             }).ToList(),
             ["objects"] = objects?.Json,
+            ["ornaments"] = ornaments?.Json,
+            ["trees"] = trees?.Json,
             ["render"] = renderEntries,
             ["ground_bake"] = groundBake,
             ["validation"] = new
@@ -464,7 +546,7 @@ internal static partial class StageIr
     }
 
     private sealed record ObjectsResult(object Json, object? ShapeCheck, int Instances, int Shapes, int CollisionTriangles,
-        int RenderTriangles);
+        int RenderTriangles, HashSet<string> TemplateIds);
 
     private static Dictionary<string, ShapeProps>? _physParams;
 
@@ -691,7 +773,8 @@ internal static partial class StageIr
             }).ToList(),
         };
 
-        return new ObjectsResult(json, shapeCheck, instances.Count, world.Count, collisionTriangles, renderTriangles);
+        return new ObjectsResult(json, shapeCheck, instances.Count, world.Count, collisionTriangles, renderTriangles,
+            all.Select(i => i.Template).ToHashSet(StringComparer.Ordinal));
     }
 
     /// <summary>
@@ -773,8 +856,15 @@ internal sealed class RouteCorridor
     private readonly Dictionary<(int, int), List<(Vector2 A, Vector2 B)>> _grid = new();
 
     public RouteCorridor(IReadOnlyList<Vector3> polyline, float radius)
+        : this([polyline], radius)
+    {
+    }
+
+    /// <summary>The union of the corridors around several routes (a stage built with its reverse / sections: --also).</summary>
+    public RouteCorridor(IEnumerable<IReadOnlyList<Vector3>> polylines, float radius)
     {
         _radius = radius;
+        foreach (var polyline in polylines)
         for (var i = 0; i + 1 < polyline.Count; i++)
         {
             var a = new Vector2(polyline[i].X, polyline[i].Z);

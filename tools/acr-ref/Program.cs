@@ -35,6 +35,8 @@ internal static class Program
                 "xref" => Xref.Run(opts),
                 "schema" => Schema.Run(opts),
                 "stage-selftest" => StageSelfTest.Run(opts),
+                "crowds-selftest" => Crowds.SelfTest(),
+                "crowds-native-selftest" => CrowdEmission.SelfTest(opts),
                 "stage-build" => StageBuild.Run(opts),
                 "stage-check" => StageBuild.RunCheck(opts),
                 "stage-verify" => StageVerify.Run(opts),
@@ -43,6 +45,8 @@ internal static class Program
                 "height-survey" => HeightSurvey.Run(opts),
                 "ground-at" => HeightSurvey.GroundAt(opts),
                 "procmesh-probe" => ProcMesh.Probe(opts),
+                "procmesh-selftest" => ProcMeshSelfTest.Run(),
+                "ground-cover-selftest" => GroundCoverSelfTest.Run(),
                 "export-info" => ExportInfo(opts),
                 "scenery-survey" => Scenery.Survey(opts),
                 "scenery-actor-slots" => Scenery.ActorSlots(opts),
@@ -60,6 +64,8 @@ internal static class Program
                 "ground-lod-test" => TerrainCompare.LodTest(opts),
                 "bounds-probe" => Bounds.Probe(opts),
                 "stage-fit" => StageFit.Run(opts),
+                "instancing-verify" => InstancingVerify.Run(opts),
+                "instancing-gap" => InstancingGap.Run(opts),
                 _ => Fail($"unknown command '{args[0]}'"),
             };
         }
@@ -76,6 +82,8 @@ internal static class Program
         usage:
           acr-ref list        [--filter <regex>] [--out <file>]
           acr-ref export      <package-path> [--out <file.json>]
+          acr-ref crowds-selftest   (synthetic crowd spot placement checks; no game data)
+          acr-ref crowds-native-selftest --legacy <root> --usmap <file> --out <scratch dir>
           acr-ref export-many --filter <regex> --out <dir> [--limit N]
           acr-ref raw         <package-path> --out <dir>
           acr-ref baked-summary <exported BakedDataContainer .json> [--out <dir>]
@@ -90,6 +98,8 @@ internal static class Program
 
         DR2 stage port (host: Hafren South forward; see docs/decisions.md D6, mods/stage/build.ps1):
           acr-ref stage-build    --ir <work/ir/stage> --legacy <retoc legacy root> --out <mod root> [--report f.json] [--keep-pacenotes 1]
+                                 [--reverse-ir <work/ir/reverse stage> [--variants config/variants.toml]]   the reverse route as the
+                                 host's reverse variant (cell 7FF9, reverse pacenotes); --ir prepared with stage-ir --also <reverse>
           acr-ref stage-fit      [--ir-root work/ir] [--out work/acr/fit-report.json] [--margin 400] [--max-length 9000] [--filter <regex>]
                                  read-only: placement + physics world box per stage (stage-build --bounds 1), long/tall stages flagged
           acr-ref stage-check    --ir <dir> --legacy <root> --report <f.json> [--out file]   offline collision/raycast/spline checks

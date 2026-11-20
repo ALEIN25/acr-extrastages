@@ -457,3 +457,55 @@ First stage: `new_zealand_rally_01_route_5` → `zz_acrxs_nz01r5_P`. Built by `a
     - CUE4Parse reads the new values back, with Time of Day unchanged at 1559.36.
     - Whether the sky recomputes the sun from these values at runtime is not verified [I]. The level also stores the
       Sun component's rotation from editor time; the in-game sun position answers it.
+- **v1.12: roadside objects and rock faces as DR2 has them [V offline: Argentina 01 r3 preview; in game pending]:**
+  first in-game drive of Argentina 01 r3 (2026-11-01): solid but invisible things on the road edge, odd boxes beside the
+  road, smeared ground.
+  - Invisible walls: DR2 puts the collision of many statics into the ground mesh (track.jpk, e.g. `RBK+` rock banks,
+    42,678 near-vertical faces within 10 m of the centreline, 3.1-4.4 m from it), and their objects have no collider
+    of their own. They were "not solid: not drawn" (266 templates over the built stages: armco, stone walls, rocks,
+    fences, corner signs, houses). Now drawn from their render mesh (`[objects] not_solid_skip` keeps plants, flags,
+    cloth, tape out; `not_solid_max_triangles` 20000) in their own `static:` sections, which the road-corridor check
+    reports instead of failing: the gates' 12 m corridor includes the verge they stand on.
+  - Boxes: `max_mesh_triangles` 4000 drew parked cars, campers and vans (7-12k triangles) as their collider boxes;
+    now 20000. Argentina 01 r3: 1.43M triangles of the 3M budget.
+  - Rock faces: render triangles steeper than `[ground] steep_rock_deg` (30) whose three DR2 layers are one texture
+    array slice (COLOR_0, dr2-formats.md 5.1: Argentina's slices 8-11, "UV rockbanks and wall") leave the top-down
+    ground bake for one `terrain:steep:<slice>` section each, on that slice + its normal map with box UVs (77k
+    triangles on Argentina 01 r3). The cut is a seam, not a hole or border, for FillHoles / AddSkirt.
+  - **No invisible obstacles (InvisibleCheck, config/visuals.toml [invisible]):** a build check compares physics with
+    visuals as height maps on a 0.5 m grid within 25 m of the route: per cell, the highest DR2 collider surface (ground,
+    object meshes, boxes, capsules) against the highest drawn surface, both at car height (2.5 m over the drawn ground).
+    A collider standing over 0.3 m above everything drawn within one cell, in clusters of 0.5 m2+, within 12 m of the
+    centreline fails the stage; colliders over their own drawn object (vehicle boxes above a bonnet) are only reported.
+    - First run on Argentina 01 r3 (after the roadside objects above): 427 obstacles within 12 m, nearly all DR2
+      collision ground 0.4-2 m above the drawn render terrain, 2.6-3.3 m from the centreline (the rock-bank walls; DR2
+      dresses them with rocks from its route patch-up meshes / ornaments, which are not read).
+    - Physics fill: DR2 collision triangles above everything drawn are drawn themselves (both sides, box UVs; rock
+      codes RBK / ROK on the stage's main steep-rock slice, the rest on its ground texture), repeated until a pass adds
+      nothing (the fill raises the drawn ground and with it the band). Argentina 01 r3: 135,741 triangles, 5 passes.
+    - Boxes: an unrotated box collider is clipped to its template's render-mesh bounds + `[shapes] box_mesh_margin_m`
+      (config/object-collision.toml).
+    - Result on Argentina 01 r3: 0 invisible obstacles within 25 m, 0 patches of undrawn physics; 1.70M triangles.
+  - Not used yet: DR2's `trees.bin`, `ornaments.bin`, `grass.grs` (vegetation) and `crowd_standing2.bin`
+    (spectators, marshals, photographers: crowds_references.xml lists 31 kinds) are undecoded binary instance lists.
+    ACR has the crowd side (`BC_CrowdSystemSpawnerBakedActor`, `BC_Marshal`, Characters/Crowd*, /Marshal).
+- **v1.13: start spot, DR2 rocks, near trees, every collider drawn [V offline: Argentina 01 r3, Finland 01 r2, Australia 01 r3, New Zealand 01 r5 scratch builds and previews; in game pending]:**
+  - Decoded since v1.12 (the formats are no longer unknown): `ornaments.bin`, `trees.bin`, `grass.grs` (scattering surfaces, not
+    instances) and `crowd_standing2.bin`. Only ornaments are used so far; the crowd heading convention is not settled.
+  - Start: the car waits 12 m before the line, not Hafren's 127 m. DR2's run-up is often shorter and holds the parked start-area
+    vehicles, so the host offset clamped every car to s = 5 m. Where DR2 starts the clock at its first gate (Finland 01 r2), the line
+    moves on to s = 20 m; the pacenotes count from the moved line.
+  - In game, the +10 s on the screenshots was a jumped start, not a build fault: no run-up was added to the splines.
+  - Colliders still undrawn after the physics fill are drawn as their own hull (`proxy:` sections, in the same closing loop), with
+    flat lids over cells the hull's upper faces leave flagged. `proxy:` sections are exempt from the road-corridor limit, as copies of
+    kept colliders. InvisibleCheck itself had the capsule axis wrong (local Z, the writer uses local Y).
+  - Trunk prisms stop at `trunk_draw_height_m` (3.5) with per-species bark. `dr2:` sections are keyed by template for material names
+    shared between templates (`water_runoff` gave the yellow house grey wood).
+  - Rocks: the physics fill was drawing DR2's invisible rock shells (86% of RBK+ within 30 m lies inside a rock's footprint).
+    `render/ornaments.glb` is drawn within `[ornaments] max_distance_m`, decimated to `decimate_ratio`, before the fill; rocks reaching
+    the road lose only the triangles over the limit. Argentina 01 r3: 971 rocks, fill 136,800 -> 17,297 triangles, 2.09M in total.
+    The faceted bank left beside the road is DR2's own render terrain, not the fill.
+  - Trees: `[vegetation]` draws the nearest trees as real LOD0 meshes up to `near_max_triangles` (about 50 per stage), cards beyond.
+    DR2's tree capsules already match the real trunks (about 1 m across at the base), so shrinking them changed little. Merged meshes
+    cannot carry the 630-3,150 trees within 10 m of a stage: docs/instancing-plan.md.
+  - A pair stores the visuals twice (22VG and 7FF9, 215 MB each on Argentina 01 r3). Not fixed.

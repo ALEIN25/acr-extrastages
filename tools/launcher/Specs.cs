@@ -9,6 +9,10 @@ internal static class Specs
     {
         public string Sky => Json["SkySection"]?.ToString() ?? "nz";
         public double GroundOffset => Json["GroundOffset"]?.GetValue<double>() ?? 0;
+        /// "acr": the road section keeps ACR's own Hafren gravel road material instead of the DR2 road texture
+        public string? Road => Json["Road"]?.ToString();
+        /// DR2 id of the reverse route built into this container as its FullReverse variant (config/variants.toml [pairs]), or null.
+        public string? Reverse => Json["Variants"]?.AsArray().Skip(1).FirstOrDefault()?["Stage"]?.ToString();
         public bool MenuImages => Json["Menu"]?["Images"]?.GetValue<bool>() == true;
         public string? MenuArt => Json["Menu"]?["Art"]?.ToString();
         public IEnumerable<KeyValuePair<string, string>> ClonePackages => Pairs("Packages");
@@ -20,7 +24,7 @@ internal static class Specs
             (Json["Clone"]?[k] as JsonObject ?? new JsonObject()).Select(p => new KeyValuePair<string, string>(p.Key, p.Value!.ToString()));
     }
 
-    public static Dictionary<string, Spec> Generate(Ctx c, StagesConfig cfg, TextWriter log)
+    public static Dictionary<string, Spec> Generate(Ctx c, StagesConfig cfg, TextWriter log, Pairs? pairs = null)
     {
         Directory.CreateDirectory(c.L.Specs);
         foreach (var pat in new[] { "acrxs*.json", "acrdirt*.json" }) Files.DeleteMatching(c.L.Specs, pat);
@@ -30,6 +34,7 @@ internal static class Specs
         var result = new Dictionary<string, Spec>(StringComparer.OrdinalIgnoreCase);
         foreach (var e in cfg.Entries().Where(x => x.Enabled))
         {
+            if (pairs?.ForwardOf(e.Dr2) is { } fwd) { log.WriteLine($"{e.Id}: built as the reverse variant of {fwd}"); continue; }
             var st = e.Raw;
             var loc = cfg.Locations[e.LocationKey];
             var irPath = Path.Combine(c.L.IrRoot, e.Dr2, "stage.json");
@@ -89,7 +94,23 @@ internal static class Specs
                     },
                 },
             };
+            if (pairs?.ReverseOf(e.Dr2) is { } rev)
+            {
+                var revPath = Path.Combine(c.L.IrRoot, rev, "stage.json");
+                if (!File.Exists(revPath)) { log.WriteLine($"missing IR {revPath} - no spec for {e.Id} (its reverse needs prepare)"); continue; }
+                var revKm = Math.Round((double)JsonNode.Parse(File.ReadAllText(revPath))!["length_m"]! / 1000, 3);
+                // the reverse variant streams only the reverse gameplay layer: Hafren's scenery sits in its rally-props layer (Scenery.cs)
+                spec["Variants"]!.AsArray().Add(new JsonObject
+                {
+                    ["Row"] = $"{id}FullReverse", ["Template"] = "WelesS4HafrenSouthFullReverse", ["Length"] = revKm, ["Stage"] = rev,
+                    ["DataLayers"] = new JsonArray("HafrenSouthFullReverseGameplayActors"),
+                });
+                spec["Clone"]!["Packages"]!["/Game/Data/Pacenote/Tables/DT_PacenoteHafrenSouthReverse"] = $"/Game/AcrXs/Stages/{id}/DT_Pacenote{id}Reverse";
+                spec["Clone"]!["Objects"]!["DT_PacenoteHafrenSouthReverse"] = $"DT_Pacenote{id}Reverse";
+            }
             if (StagesConfig.Num(st, "ground_offset") is { } go) spec["GroundOffset"] = go;
+            if ((StagesConfig.Str(st, "road") ?? StagesConfig.Str(loc, "road")) is { } road)
+                spec["Road"] = road is "acr" or "dr2" ? road : throw new LauncherException($"{e.Id}: road must be acr or dr2, not {road}");
             if (StagesConfig.Bool(st, "menu_images"))
             {
                 var menu = new JsonObject { ["Images"] = true };

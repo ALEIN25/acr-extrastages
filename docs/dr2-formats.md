@@ -361,6 +361,7 @@ PSSG scenes are read with EgoEngineLibrary (`PssgFile`); `dr2-extract pssg-info`
 | node | shader(s) | role | NZ01 tiles / triangles |
 |---|---|---|---|
 | `SHADOWCASTING_i_j` (under `ROOT_i_j`) | `terrain_array.fx` (instances `terrain_array!N`, `Corner Cutting!N`) | **full-detail terrain** (the name is misleading) | 37 / 2,905,443 |
+| `HIGH_i_j` (Finland, Scotland only) | the layered terrain shaders (§5.2) | **full-detail terrain too**, for other areas: Finland 01 has its middle tiles (5_0..7_1) only here, and 4 tiles split between both | Finland 01: 12 / 704,927 |
 | `DECAL_i_j` | `decal_ao.fx` | road decals | 25 / 36,558 |
 | `LOW_i_j` | `terrain_lod.fx` | low-LOD terrain of the same area | 37 / 50,649 |
 | `NONLOD_i_j` (under `LAND_i_j`, 3×3 grid, ±10 km) | `terrain_track_vista_d4.fx` | distant vista | 9 / 223,300 |
@@ -467,6 +468,28 @@ practically neutral on this stage.
 - They add the wheel ruts. They sit on top of the road layers, so the road is not drawn twice.
 
 **Reference.** The `LOW_i_j` tiles (`terrain_lod.fx`, `low_*_d` textures) are DR2's own pre-baked low-LOD colour.
+
+### 5.2 Layered terrain shaders (`terrain_road`, `terrain_wsm_blend_nm`, `terrain_wsm_edge_nm`, `terrain_rockbank`) [V/I]
+
+Used by about two thirds of the locations (Finland, Australia, ...) instead of `terrain_array.fx`. Measured on
+`finland_rally_01` with `dr2-extract terrain-info <tracksplit.pssg> --stats-wsm`.
+
+- Vertex stride 56: position, `Color uint_color_argb`, two `ST half4`, normal, tangent, binormal.
+- `ST0.xy`: road-aligned UV [V]: on `terrain_road` U is 0..1 across the road (99.8 % inside 0..1), V runs along at
+  ~0.17 per metre. `ST0.zw`: a second, roughly metric unwrap (~0.12 per metre on most triangles) [I].
+- `ST1.xy`: the section atlas (0..1, ~0.0075 per metre on the road) for `TColourMap`, `TAmbientOcclusion` and the
+  low-LOD texture [V: DR2's `low_*sec_<s>_<nn>_d` sampled through it renders a coherent top view]. `ST1.zw` is another
+  atlas-range UV that does not line up with the low-LOD texture [V].
+- Colour byte 1: 0..255, mostly 0 or 255, taken as the Map1 -> Map2 blend weight [I]; byte 3 mostly 98 or 230 [?].
+- Shader inputs: `TDiffuseSpecMap1..4` / `TNormalMap1..4` / `TBlendMap2..4`, `Map<n>UVScaleAndOffset` (1 for the
+  road-aligned layer, 8 for detail layers), `BlendMaskUVScale`, `BlendMaskSoftness`, `EdgeSCurve*`. DR2's exact blend is
+  not decoded.
+
+**Bake [I, tuned by eye on the probe]:** the large-scale colour is DR2's own low-LOD texture on `ST1.xy` (it already
+holds DR2's full shading at ~25-50 cm/px); detail = Map1 on `ST0.xy` × scale blended into Map2 on `ST0.zw` × scale by
+colour byte 1, and only its ratio to the layers' mean colour is applied: `final = low × detail / mean(detail)`. The
+`terrain_array.fx` path uses the same low-LOD colour when a `terrain_lod.fx` shader shares its lightmap.
+`DR2_BAKE_LAYERED=low|low_zw|cm|detail|nolow` renders the pieces for `--bake-probe` comparisons.
 The bake's overview (`ground_bake/overview.png`) matches DR2's (`overview_dr2_lowlod.png`) in road placement, hue
 and large-scale variation.
 

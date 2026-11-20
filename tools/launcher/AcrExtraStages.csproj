@@ -22,4 +22,8 @@
   <ItemGroup>
     <PackageReference Include="System.Drawing.Common" Version="10.0.0" />
   </ItemGroup>
+  <ItemGroup>
+    <!-- the UI launcher's page (GuiServer), served from inside the exe -->
+    <EmbeddedResource Include="ui\index.html" LogicalName="ui.index.html" />
+  </ItemGroup>
 </Project>

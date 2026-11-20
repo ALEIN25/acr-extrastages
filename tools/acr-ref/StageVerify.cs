@@ -87,8 +87,10 @@ internal static class StageVerify
         var reparam = centre.SelectToken("Properties.SplineCurves.ReparamTable.Points") as JArray;
         double len = reparam?.Last?["InVal"]?.Value<double>() / 100 ?? 0;
         C(pts == ir.Centre.Count, $"CenterSpline via CUE4Parse: {pts} points, {len:0.#} m (HUD route length; DR2 total {ir.TotalM:0.#} m)");
-        var startMesh = cell.Where(e => e.ExportType == "ProceduralMeshComponent")
-            .MaxBy(e => e.GetOrDefault<UScriptArray>("ProcMeshSections")?.Properties.Count ?? 0)!;
+        var visualMeshes = cell.Where(e => e.ExportType == "ProceduralMeshComponent")
+            .Where(e => (e.GetOrDefault<UScriptArray>("ProcMeshSections")?.Properties.Count ?? 0) > 1).ToList();
+        foreach (var startMesh in visualMeshes)
+        {
         var secs = startMesh.GetOrDefault<UScriptArray>("ProcMeshSections");
         var mats = startMesh.GetOrDefault<UScriptArray>("OverrideMaterials");
         var matJson = mats is null ? "" : JsonConvert.SerializeObject(mats);
@@ -103,6 +105,7 @@ internal static class StageVerify
                 var target = mc?.ResolvedObject;
                 w.WriteLine($"     {trig.ExportType}.MeshComponent -> {target?.Outer?.Name}.{target?.Name} ({(target?.Name.ToString() == startMesh.Name && target?.Outer?.Name.ToString() == startMesh.Outer?.Name.ToString() ? "the visuals mesh" : "a ring")})");
             }
+        }
         }
         foreach (var name in new[] { "RaceSector", "BC_StartSequenceTrigger_C", "BC_EndSequenceTrigger_C", "BC_CompleStartTargetPoint_C" })
             foreach (var a in cell.Where(e => e.ExportType == name))
@@ -162,10 +165,10 @@ internal static class StageVerify
               $"{terrainHidden} of {terrain.Count} Hafren terrain tiles bHidden with their StaticMeshComponent");
         }
 
-        if (o.Named.GetValueOrDefault("dr2-root") is { } dr2Root && secs is not null)
+        if (o.Named.GetValueOrDefault("dr2-root") is { } dr2Root && visualMeshes.Count > 0)
         {
             // v1.8: the DR2 MICs on the visuals mesh and their textures as the game's reader loads them
-            var paths = System.Text.RegularExpressions.Regex.Matches(matJson, $@"{System.Text.RegularExpressions.Regex.Escape(dr2Root)}/[\w/]+")
+            var paths = System.Text.RegularExpressions.Regex.Matches(string.Join("", visualMeshes.Select(mesh => JsonConvert.SerializeObject(mesh.GetOrDefault<UScriptArray>("OverrideMaterials")))), $@"{System.Text.RegularExpressions.Regex.Escape(dr2Root)}/[\w/]+")
                 .Select(m => m.Value).Distinct().ToList();
             var previews = o.Named.GetValueOrDefault("previews");
             if (previews is not null)
@@ -181,8 +184,9 @@ internal static class StageVerify
                     var mic = p.LoadPackage("acr/Content" + path["/Game".Length..] + ".uasset").GetExports()
                         .OfType<CUE4Parse.UE4.Assets.Exports.Material.UMaterialInstanceConstant>().Single();
                     var parent = mic.Parent?.Load<CUE4Parse.UE4.Assets.Exports.Material.UMaterialInterface>();
-                    if (parent?.Name != "M_Simple") { bad.Add($"{path}: parent {parent?.Name ?? "unresolved"}"); continue; }
-                    bool ok = mic.TextureParameterValues.Length == 3;
+                    if (parent?.Name is not ("M_Simple" or "M_MasterMaskedSurfaces")) { bad.Add($"{path}: parent {parent?.Name ?? "unresolved"}"); continue; }
+                    // 3: base colour, ORM, normal; 5: the ground bake's detail-normal template (+ detail and global normal)
+                    bool ok = mic.TextureParameterValues.Length is 3 or 5;
                     foreach (var tp in mic.TextureParameterValues)
                     {
                         var tex = tp.ParameterValue.Load<CUE4Parse.UE4.Assets.Exports.Texture.UTexture2D>();
@@ -207,7 +211,7 @@ internal static class StageVerify
                 catch (Exception e) { bad.Add($"{path}: {e.GetType().Name} {e.Message}"); }
             }
             C(micOk == paths.Count && bad.Count == 0,
-              $"DR2 materials via CUE4Parse: {micOk} of {paths.Count} MICs load with parent M_Simple and 3 textures; {texOk} distinct textures load " +
+              $"DR2 materials via CUE4Parse: {micOk} of {paths.Count} MICs load with parent M_Simple and 3 (or 5, detail normal) textures; {texOk} distinct textures load " +
               $"(NeverStream, not virtual, every mip's data present){(previews is not null ? $"; {png} base colour previews -> {previews}" : "")}" +
               (bad.Count > 0 ? $"; {string.Join("; ", bad.Take(5))}" : ""));
         }

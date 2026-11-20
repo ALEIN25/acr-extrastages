@@ -39,6 +39,7 @@ internal static class Program
                 "catalog" => await CatalogCommand.Run(args[1..]),
                 "pacenote-survey" => await PacenoteSurvey.Run(args[1..]),
                 "route-map-check" => await RouteMapCheck.Run(args[1..]),
+                "route-layout" => await RouteLayout.Run(args[1..]),
                 _ => Usage(),
             };
         }
@@ -66,6 +67,7 @@ internal static class Program
                            [--textures <dir> [--texture-pssg <a.pssg;b.pssg>]]   render meshes (world space) + DDS
               stage-ir <stage_id> [--render] [--corridor 250] [--out work/ir] [--dr2 <dir>] [--cache <dir>]
                        [--surface-map config/surface-map.toml]   DR2 stage -> work/ir/<stage_id>/ (docs/stage-ir.md)
+              route-layout [--filter _rally_] [--out work/layouts]   route + timing points only, one json per stage
               catalog [--filter _rally_] [--out work/dr2/catalog]   all stages + surface codes vs surface map
               pacenote-survey [--filter _rally_] [--out work/dr2/pacenote-survey.md]   codriver field stats + geometry checks
             DR2 install: --dr2, else %DR2_DIR%, else C:\Games\DiRT Rally 2.0. Set DR2_DEBUG=1 for stack traces,

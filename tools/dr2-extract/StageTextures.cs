@@ -40,18 +40,23 @@ internal static partial class StageTextures
         refs = refs.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
 
         var files = refs.Where(r => r.IndexOf('#') > 0).SelectMany(r => r[..r.IndexOf('#')].Split('|'))
-            .Append("tracksplit.pssg")
+            .Append("tracksplit.pssg").Append("ground_cover.pssg")
             .Concat(install.List($"{st.RouteDir}/").Concat(install.List($"{st.LocDir}/"))
                 .Where(p => p.EndsWith(".pssg", StringComparison.OrdinalIgnoreCase)
-                            && (p.Contains("textures", StringComparison.OrdinalIgnoreCase) || p.EndsWith("/patchup_ot.pssg", StringComparison.OrdinalIgnoreCase))
+                            // patchup_ot.pssg (location) and route_patchup_ot.pssg (route, game_2_1.dat): the full textures that
+                            // the location and route texture files only hold as 4x4 stand-ins
+                            && (p.Contains("textures", StringComparison.OrdinalIgnoreCase) || p.EndsWith("patchup_ot.pssg", StringComparison.OrdinalIgnoreCase))
                             && p.Count(c => c == '/') <= st.RouteDir.Count(c => c == '/') + 1)
                 .Select(p => p[(p.LastIndexOf('/') + 1)..]))
             .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         var sources = new List<PssgFile>();
         foreach (var file in files)
         {
+            // sponsor banners reference "sponsor_pack_a.pssg|sponsor_fallback.pssg#cloth_b.tga": the packs are filled at run time, the
+            // fallback (DR2's own default banners) lives in tracks/sponsors/
             var path = install.Exists($"{st.RouteDir}/{file}") ? $"{st.RouteDir}/{file}"
-                : install.Exists($"{st.LocDir}/{file}") ? $"{st.LocDir}/{file}" : null;
+                : install.Exists($"{st.LocDir}/{file}") ? $"{st.LocDir}/{file}"
+                : install.Exists($"tracks/sponsors/{file}") ? $"tracks/sponsors/{file}" : null;
             if (path is null) { Console.WriteLine($"  source {file}: not found"); continue; }
             try
             {

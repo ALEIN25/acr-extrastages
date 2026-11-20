@@ -17,6 +17,19 @@ internal sealed class Ctx
     public bool Force { get; init; }
     public bool NoVerify { get; init; }
     public bool KeepTemp { get; init; }
+    public bool Preview { get; init; }
+    /// Stages prepared / built at the same time (--jobs; 0 = auto: half the cores, about 8 GB of RAM each, at most 4).
+    public int Jobs { get; set; }
+
+    public int EffectiveJobs
+    {
+        get
+        {
+            if (Jobs > 0) return Jobs;
+            long ramGb = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes / (1L << 30);
+            return Math.Clamp(Math.Min(Environment.ProcessorCount / 2, (int)(ramGb / 8)), 1, 4);
+        }
+    }
     public bool IgnoreDisk { get; init; }
     public bool Copy { get; init; }
     public double? MaxLengthKm { get; init; }

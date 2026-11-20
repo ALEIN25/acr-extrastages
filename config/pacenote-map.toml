@@ -35,6 +35,15 @@ hairpin = "{Dir}HP"
 # decoded (docs/dr2-formats.md), so they stay unmapped.
 [modifiers]
 dont_cut = "DontCut"
+# modifier_b_1 on corners: 60 % sit on a > 1 m bump 20-170 m after the read point vs 27 % of all corners (15 prepared stages)
+modifier_b_1 = "OverCrest"
+
+# DR2 call types without a corner of their own, said with the corner of the same phrase (Pacenotes.Generate). Inferred from the
+# road height profile 20-170 m after the read point over 15 prepared stages (bump / hollow > 1 m vs 27 % / 27 % for corners):
+#   type 9 (1005 in DR2): bump in 44 % -> crest;  type 7 (210): hollow in 67 % -> dip;  type 5: no height signature, unmapped
+[calls]
+type9 = "OverCrest"
+type7 = "IntoDip"
 
 # DR2 spoken distances between linked corners. ACR has no call below Dist40; its own tables use a conjunction for
 # such short gaps, so these become "And" on the following corner (and link the two rows).

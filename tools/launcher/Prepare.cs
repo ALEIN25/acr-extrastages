@@ -72,17 +72,43 @@ internal static class Prepare
 
     public sealed record Row(string Stage, bool Ok, string? Bake, string? Error, int MissingOptional, int Attempts, List<string> Steps, int Seconds);
 
-    /// Prepares one stage; never throws for stage problems (the batch continues past a failing stage).
-    public static Row Stage(Ctx c, StageEntry st, TextWriter log)
+    /// The routes a prepared stage.json's ground / render / bake also cover (stage-ir --also), from the top of the file.
+    public static string[] CorridorAlso(string dir)
+    {
+        var p = Path.Combine(dir, "stage.json");
+        if (!File.Exists(p)) return [];
+        using var r = new StreamReader(p);
+        var head = new char[8192];
+        var text = new string(head, 0, r.ReadBlock(head, 0, head.Length));
+        var m = Regex.Match(text, @"""corridor_also""\s*:\s*\[([^\]]*)\]");
+        return m.Success ? Regex.Matches(m.Groups[1].Value, @"""([^""]+)""").Select(x => x.Groups[1].Value).ToArray() : [];
+    }
+
+    /// Round 2b: stage.json written by a dr2-extract that knows ornaments (stage-ir --render) has a top-level "ornaments" key, a
+    /// null one for a stage without any; a file without the key predates them, so the stage is extracted again (stage-ir, then
+    /// stage-textures for the rock textures the new materials file needs) to pick the rocks up.
+    public static bool HasOrnamentsKey(string dir)
+    {
+        var p = Path.Combine(dir, "stage.json");
+        if (!File.Exists(p)) return false;
+        foreach (var line in File.ReadLines(p))
+            if (line.StartsWith("  \"ornaments\":", StringComparison.Ordinal)) return true;
+        return false;
+    }
+
+    /// Prepares one stage; never throws for stage problems (the batch continues past a failing stage). <paramref name="reverse"/>:
+    /// the DR2 reverse built into the same container (config/variants.toml [pairs]): the ground, render and bake cover its road too
+    /// (stage-ir --also), and the reverse itself gets a gameplay-only IR (route, timing, triggers, pacenotes; no render).
+    public static Row Stage(Ctx c, StageEntry st, TextWriter log, string? reverse = null)
     {
         var id = st.Dr2;
         var dir = Path.Combine(c.L.IrRoot, id);
         var failed = Path.Combine(dir, "prepare-failed.json");
         var attemptsPath = Path.Combine(c.L.Batch, "prepare-attempts.json");
-        var attempts = ReadAttempts(attemptsPath);
         var steps = new List<string>();
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        int n = attempts.GetValueOrDefault(id);
+        int n;
+        lock (AttemptsGate) n = ReadAttempts(attemptsPath).GetValueOrDefault(id);
         var terrain = Path.Combine(dir, "render", "terrain.glb");
         var manifest = Path.Combine(dir, "render", "ground_bake", "manifest.json");
         var skipped = Path.Combine(dir, "render", "ground_bake", "skipped.json");
@@ -95,7 +121,10 @@ internal static class Prepare
                 return new(id, false, null, $"failed (max attempts): {why}", 0, n, new() { "failed_marker" }, 0);
             }
             var m0 = Check(dir);
-            if (!c.Force && m0.Required.Count == 0)
+            bool corridorOk = reverse is null || CorridorAlso(dir).Contains(reverse);
+            bool reverseOk = reverse is null || File.Exists(Path.Combine(c.L.IrRoot, reverse, "stage.json"));
+            bool ornamentsOk = HasOrnamentsKey(dir);
+            if (!c.Force && m0.Required.Count == 0 && corridorOk && reverseOk && ornamentsOk)
                 return new(id, true, File.Exists(manifest) ? "ok" : "skipped", null, m0.OptionalFiles.Count, n, new() { "skip" }, 0);
 
             if (!c.Force && n >= c.MaxPrepareAttempts)
@@ -104,15 +133,16 @@ internal static class Prepare
                 WriteMarker(failed, reason);
                 throw new StepFailed(reason);
             }
-            attempts[id] = ++n;
-            SaveAttempts(attemptsPath, attempts);
+            n++;
+            UpdateAttempts(attemptsPath, a => a[id] = n);
             var exe = c.L.Tool("dr2-extract");
             var dr2 = new[] { "--dr2", c.Dr2Dir! };
 
-            bool needIr = c.Force || !File.Exists(terrain) || !File.Exists(Path.Combine(dir, "stage.json")) || !File.Exists(manifest) && !File.Exists(skipped);
+            bool needIr = c.Force || !corridorOk || !ornamentsOk || !File.Exists(terrain) || !File.Exists(Path.Combine(dir, "stage.json")) || !File.Exists(manifest) && !File.Exists(skipped);
             if (needIr)
             {
-                var ir = c.P.Run(exe, new[] { "stage-ir", id, "--render", "--bake-ground", "--out", c.L.IrRoot }.Concat(dr2), log, $"{st.Id}: extracting stage data");
+                var also = reverse is null ? Array.Empty<string>() : new[] { "--also", reverse };
+                var ir = c.P.Run(exe, new[] { "stage-ir", id, "--render", "--bake-ground", "--bake-lighting", c.Cfg.BakeLighting, "--out", c.L.IrRoot }.Concat(also).Concat(dr2), log, $"{st.Id}: extracting stage data");
                 steps.Add("stage-ir");
                 if (ir.Code != 0)
                 {
@@ -133,6 +163,11 @@ internal static class Prepare
                 c.P.Must(exe, new[] { "stage-textures", id, "--ir", c.L.IrRoot }.Concat(dr2), log, $"{st.Id}: extracting textures");
                 steps.Add("stage-textures");
             }
+            if (reverse is not null && (c.Force || !reverseOk))
+            {
+                c.P.Must(exe, new[] { "stage-ir", reverse, "--out", c.L.IrRoot }.Concat(dr2), log, $"{st.Id}: extracting the reverse route");
+                steps.Add("stage-ir reverse");
+            }
             if (!File.Exists(terrain)) throw new StepFailed("no render/terrain.glb after stage-ir");
             if (!File.Exists(Path.Combine(dir, "stage.json"))) throw new StepFailed("no stage.json after stage-ir");
             if (File.Exists(manifest)) { bake = "ok"; if (File.Exists(skipped)) File.Delete(skipped); }
@@ -142,8 +177,7 @@ internal static class Prepare
             var m2 = Check(dir);
             if (m2.Required.Count > 0)
                 throw new StepFailed($"still missing required files ({m2.Required.Count}): {string.Join(", ", m2.Required.Take(5))}");
-            attempts.Remove(id);
-            SaveAttempts(attemptsPath, attempts);
+            UpdateAttempts(attemptsPath, a => a.Remove(id));
             if (File.Exists(failed)) File.Delete(failed);
             return new(id, true, bake, null, m2.OptionalFiles.Count, n, steps, (int)sw.Elapsed.TotalSeconds);
         }
@@ -152,6 +186,19 @@ internal static class Prepare
             if (n >= c.MaxPrepareAttempts && !File.Exists(failed)) WriteMarker(failed, e.Message);
             log.WriteLine($"prepare {id}: {e.Message}");
             return new(id, false, bake, e.Message, 0, n, steps, (int)sw.Elapsed.TotalSeconds);
+        }
+    }
+
+    /// prepare-attempts.json is shared by the stages being prepared at the same time: read-modify-write under one lock.
+    static readonly object AttemptsGate = new();
+
+    static void UpdateAttempts(string p, Action<Dictionary<string, int>> change)
+    {
+        lock (AttemptsGate)
+        {
+            var a = ReadAttempts(p);
+            change(a);
+            SaveAttempts(p, a);
         }
     }
 

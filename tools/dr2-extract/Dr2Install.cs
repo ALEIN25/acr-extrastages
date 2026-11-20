@@ -16,6 +16,7 @@ internal sealed class Dr2Install
 {
     private static readonly string[] PatchLayers = ["game_2_1.dat", "game_2.dat"];
     private static readonly string[] BaseLayers = ["game_1.dat", "game.dat"];
+    private const string SharedLayer = "game.nefs";
 
     private readonly Dictionary<string, Layer> _layers = new(StringComparer.OrdinalIgnoreCase);
     private readonly string _cache;
@@ -50,6 +51,10 @@ internal sealed class Dr2Install
                          ?? throw new InvalidOperationException($"no NeFS header for game\\{name} in dirtrally2.exe");
             install.Add(name, await reader.ReadArchiveAsync(source, progress));
         }
+
+        // gamegame.nefs: a standalone archive (shared track data such as tracks/sponsors/, the default sponsor banners), below the base layers
+        var shared = Path.Combine(dataDir, SharedLayer);
+        if (File.Exists(shared)) install.Add(SharedLayer, await Program.Open(shared));
 
         return install;
     }
@@ -105,6 +110,8 @@ internal sealed class Dr2Install
         {
             yield return _layers[name];
         }
+
+        if (_layers.TryGetValue(SharedLayer, out var shared)) yield return shared;
     }
 
     public bool Exists(string path) => Order(path).Any(l => l.Files.ContainsKey(path));
@@ -132,14 +139,27 @@ internal sealed class Dr2Install
         }
 
         Directory.CreateDirectory(Path.GetDirectoryName(target)!);
-        // OpenWrite does not truncate; a prior partial extract must be removed or the file stays short.
-        if (File.Exists(target))
+        var transformer = new NefsTransformer(new FileSystem());
+        if (temporary)
         {
-            File.Delete(target);
+            await transformer.DetransformAsync(item.DataSource, target, 0, new NefsProgress(CancellationToken.None));
+            return target;
         }
 
-        var transformer = new NefsTransformer(new FileSystem());
-        await transformer.DetransformAsync(item.DataSource, target, 0, new NefsProgress(CancellationToken.None));
+        // Extract to a private name, then move into place: several stages may be prepared at once (launcher), and two
+        // processes fetching the same shared file must never read or write each other's half-written copy.
+        var tmp = $"{target}.{Environment.ProcessId}-{Guid.NewGuid():N}.part";
+        await transformer.DetransformAsync(item.DataSource, tmp, 0, new NefsProgress(CancellationToken.None));
+        try
+        {
+            File.Move(tmp, target, overwrite: true);
+        }
+        catch (IOException) when (File.Exists(target) && new FileInfo(target).Length == item.ExtractedSize)
+        {
+            // another process put a complete copy there first (and may be reading it)
+            File.Delete(tmp);
+        }
+
         return target;
     }
 }

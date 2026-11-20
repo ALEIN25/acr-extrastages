@@ -10,6 +10,7 @@ internal sealed class Layout
     public string Config => Path.Combine(Root, "config");
     public string StagesToml => Path.Combine(Config, "stages.toml");
     public string IrRoot => Path.Combine(Work, "ir");
+    public string Layouts => Path.Combine(Work, "layouts");                    // dr2-extract route-layout: <dr2 id>.json, the stage map before a stage is prepared
     public string AcrWork => Path.Combine(Work, "acr");
     public string Additive => Path.Combine(AcrWork, "additive");
     public string Dist => Path.Combine(Additive, "dist");
@@ -17,6 +18,7 @@ internal sealed class Layout
     public string Logs => Path.Combine(Batch, "logs");
     public string State => Path.Combine(Batch, "state");
     public string Specs => Path.Combine(AcrWork, "specs");
+    public string Preview => Path.Combine(AcrWork, "preview");                 // --preview: <id>\preview.glb + textures (tools\preview)
     public string MappingsCache => Path.Combine(Work, "mappings");
     public string MenuArt => Path.Combine(Work, "dr2", "menu-art");
     public string MenuArtLoading => Path.Combine(MenuArt, "frontend", "streamed_textures", "loading");

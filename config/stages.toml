@@ -9,6 +9,8 @@
 #   tile / logo = vanilla DT_TracksLocationsBackgrounds / Logos row; otherwise the tile is cropped from DR2 loading art
 #   (tile_art = "<tpk name>", default the location's first rally route 0) and the logo is a generated rally plate in
 #   logo_colors = "<plate>,<stripe>,..." (scripts/menu-location-logos.ps1).
+# road (per stage or location): the road comes from DR2's ground bake when the stage has one; road = "dr2" uses the
+#   tiling DR2 road texture instead, road = "acr" ACR's own Hafren gravel road material.
 
 [locations.argentina]
 name = "Argentina"
